@@ -1,4 +1,5 @@
 package net.loveruby.cflat.ir;
+
 import net.loveruby.cflat.asm.Type;
 
 public class Mem extends Expr {
@@ -9,13 +10,15 @@ public class Mem extends Expr {
         this.expr = expr;
     }
 
-    public Expr expr() { return expr; }
+    public Expr expr() {
+        return expr;
+    }
 
     public Expr addressNode(Type type) {
         return expr;
     }
 
-    public <S,E> E accept(IRVisitor<S,E> visitor) {
+    public <S, E> E accept(IRVisitor<S, E> visitor) {
         return visitor.visit(this);
     }
 

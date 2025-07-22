@@ -15,7 +15,6 @@ import net.loveruby.cflat.type.*;
 import net.loveruby.cflat.asm.Label;
 import net.loveruby.cflat.utils.ErrorHandler;
 import net.loveruby.cflat.exception.*;
-import java.lang.reflect.*;
 import java.util.*;
 import java.io.*;
 

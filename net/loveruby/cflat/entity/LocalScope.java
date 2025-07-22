@@ -1,4 +1,5 @@
 package net.loveruby.cflat.entity;
+
 import net.loveruby.cflat.type.Type;
 import net.loveruby.cflat.utils.ErrorHandler;
 import net.loveruby.cflat.exception.*;
@@ -56,8 +57,7 @@ public class LocalScope extends Scope {
         DefinedVariable var = variables.get(name);
         if (var != null) {
             return var;
-        }
-        else {
+        } else {
             return parent.get(name);
         }
     }
@@ -104,6 +104,19 @@ public class LocalScope extends Scope {
             }
         }
         return result;
+    }
+
+    public List<DefinedVariable> allVariablesWithPrivate() {
+        List<DefinedVariable> result = new ArrayList<DefinedVariable>();
+        collectAllVariablesWithPrivate(result);
+        return result;
+    }
+
+    private void collectAllVariablesWithPrivate(List<DefinedVariable> buf) {
+        buf.addAll(variables.values());
+        for (LocalScope s : children) {
+            s.collectAllVariablesWithPrivate(buf);
+        }
     }
 
     // Returns a list of all child scopes including this scope.

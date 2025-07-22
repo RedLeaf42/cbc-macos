@@ -1,4 +1,5 @@
 package net.loveruby.cflat.compiler;
+
 import net.loveruby.cflat.ast.*;
 import net.loveruby.cflat.entity.*;
 import net.loveruby.cflat.type.Type;
@@ -92,12 +93,40 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
 
     // #@@range/assign{
     private void assign(Location loc, Expr lhs, Expr rhs) {
-        stmts.add(new Assign(loc, addressOf(lhs), rhs));
+        // 对于简单的左值，直接赋值
+        if (lhs instanceof Mem || lhs instanceof Var) {
+            stmts.add(new Assign(loc, lhs, rhs));
+        } else {
+            // 对于复杂的左值，使用临时变量保存右值
+            Type tmpType = asmTypeToType(rhs.type());
+            DefinedVariable tmp = tmpVar(tmpType);
+            stmts.add(new Assign(loc, ref(tmp), rhs)); // tmp = rhs
+            stmts.add(new Assign(loc, addressOf(lhs), ref(tmp))); // *lhs = tmp
+        }
     }
     // #@@}
 
     private DefinedVariable tmpVar(Type t) {
         return scopeStack.getLast().allocateTmp(t);
+    }
+
+    // 从asm.Type转换为Type
+    private Type asmTypeToType(net.loveruby.cflat.asm.Type asmType) {
+        int size = asmType.size();
+        if (size == typeTable.intSize()) {
+            return typeTable.signedInt();
+        } else if (size == typeTable.longSize()) {
+            return typeTable.signedLong();
+        } else if (size == typeTable.pointerSize()) {
+            return typeTable.pointerTo(typeTable.signedInt()); // 假设指向int
+        } else if (size == 1) {
+            return typeTable.signedChar();
+        } else if (size == 2) {
+            return typeTable.signedShort();
+        } else {
+            // 默认使用int
+            return typeTable.signedInt();
+        }
     }
 
     private void label(Label label) {
@@ -169,10 +198,9 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
                 if (var.isPrivate()) {
                     // static variables
                     var.setIR(transformExpr(var.initializer()));
-                }
-                else {
+                } else {
                     assign(var.location(),
-                        ref(var), transformExpr(var.initializer()));
+                            ref(var), transformExpr(var.initializer()));
                 }
             }
         }
@@ -187,7 +215,7 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
         // do not use transformStmt here, to receive compiled tree.
         Expr e = node.expr().accept(this);
         if (e != null) {
-            //stmts.add(new ExprStmt(node.expr().location(), e));
+            // stmts.add(new ExprStmt(node.expr().location(), e));
             errorHandler.warn(node.location(), "useless expression");
         }
         return null;
@@ -206,8 +234,7 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
             transformStmt(node.thenBody());
             label(endLabel);
             // #@@}
-        }
-        else {
+        } else {
             // #@@range/If_withelse{
             cjump(node.location(), cond, thenLabel, elseLabel);
             label(thenLabel);
@@ -231,11 +258,10 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
         for (CaseNode c : node.cases()) {
             if (c.isDefault()) {
                 defaultLabel = c.label();
-            }
-            else {
+            } else {
                 for (ExprNode val : c.values()) {
                     Expr v = transformExpr(val);
-                    cases.add(new Case(((Int)v).value(), c.label()));
+                    cases.add(new Case(((Int) v).value(), c.label()));
                 }
             }
         }
@@ -277,7 +303,7 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
 
     public Void visit(DoWhileNode node) {
         Label begLabel = new Label();
-        Label contLabel = new Label();  // before cond (end of body)
+        Label contLabel = new Label(); // before cond (end of body)
         Label endLabel = new Label();
 
         pushContinue(contLabel);
@@ -319,8 +345,7 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
     public Void visit(BreakNode node) {
         try {
             jump(node.location(), currentBreakTarget());
-        }
-        catch (JumpError err) {
+        } catch (JumpError err) {
             error(node, err.getMessage());
         }
         return null;
@@ -330,8 +355,7 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
     public Void visit(ContinueNode node) {
         try {
             jump(node.location(), currentContinueTarget());
-        }
-        catch (JumpError err) {
+        } catch (JumpError err) {
             error(node, err.getMessage());
         }
         return null;
@@ -344,8 +368,7 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
             if (node.stmt() != null) {
                 transformStmt(node.stmt());
             }
-        }
-        catch (SemanticException ex) {
+        } catch (SemanticException ex) {
             error(node, ex.getMessage());
         }
         return null;
@@ -376,11 +399,11 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
     }
 
     private Label defineLabel(String name, Location loc)
-                                    throws SemanticException {
+            throws SemanticException {
         JumpEntry ent = getJumpEntry(name);
         if (ent.isDefined) {
             throw new SemanticException(
-                "duplicated jump labels in " + name + "(): " + name);
+                    "duplicated jump labels in " + name + "(): " + name);
         }
         ent.isDefined = true;
         ent.location = loc;
@@ -486,8 +509,7 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
             assign(lloc, transformExpr(node.lhs()), rhs);
             // #@@}
             return null;
-        }
-        else {
+        } else {
             // lhs = rhs -> tmp = rhs, lhs = tmp, tmp
             // #@@range/Assign_expr{
             DefinedVariable tmp = tmpVar(node.rhs().type());
@@ -531,15 +553,13 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
             // expr++; -> expr += 1;
             transformOpAssign(loc, op, t, expr, imm(t, 1));
             return null;
-        }
-        else if (expr.isVar()) {
+        } else if (expr.isVar()) {
             // cont(expr++) -> v = expr; expr = v + 1; cont(v)
             DefinedVariable v = tmpVar(t);
             assign(loc, ref(v), expr);
             assign(loc, expr, bin(op, t, ref(v), imm(t, 1)));
             return ref(v);
-        }
-        else {
+        } else {
             // cont(expr++) -> a = &expr; v = *a; *a = *a + 1; cont(v)
             // #@@range/SuffixOp_expr{
             DefinedVariable a = tmpVar(pointerTo(t));
@@ -560,8 +580,7 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
             // cont(lhs += rhs) -> lhs = lhs + rhs; cont(lhs)
             assign(loc, lhs, bin(op, lhsType, lhs, rhs));
             return isStatement() ? null : lhs;
-        }
-        else {
+        } else {
             // cont(lhs += rhs) -> a = &lhs; *a = *a + rhs; cont(*a)
             DefinedVariable a = tmpVar(pointerTo(lhsType));
             assign(loc, ref(a), addressOf(lhs));
@@ -577,8 +596,7 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
             return new Bin(left.type(), op, left,
                     new Bin(right.type(), Op.MUL,
                             right, ptrBaseSize(leftType)));
-        }
-        else {
+        } else {
             return new Bin(left.type(), op, left, right);
         }
     }
@@ -595,8 +613,7 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
         if (isStatement()) {
             stmts.add(new ExprStmt(node.location(), call));
             return null;
-        }
-        else {
+        } else {
             DefinedVariable tmp = tmpVar(node.type());
             assign(node.location(), ref(tmp), call);
             return ref(tmp);
@@ -624,14 +641,12 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
             // ptr - ptr -> (ptr - ptr) / ptrBaseSize
             Expr tmp = new Bin(asmType(t), op, left, right);
             return new Bin(asmType(t), Op.S_DIV, tmp, ptrBaseSize(l));
-        }
-        else if (isPointerArithmetic(op, l)) {
+        } else if (isPointerArithmetic(op, l)) {
             // ptr + int -> ptr + (int * ptrBaseSize)
             return new Bin(asmType(t), op,
                     left,
                     new Bin(asmType(r), Op.MUL, right, ptrBaseSize(l)));
-        }
-        else if (isPointerArithmetic(op, r)) {
+        } else if (isPointerArithmetic(op, r)) {
             // int + ptr -> (int * ptrBaseSize) + ptr
             return new Bin(asmType(t), op,
                     new Bin(asmType(l), Op.MUL, left, ptrBaseSize(r)),
@@ -652,8 +667,7 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
         if (node.operator().equals("+")) {
             // +expr -> expr
             return transformExpr(node.expr());
-        }
-        else {
+        } else {
             return new Uni(asmType(node.type()),
                     Op.internUnary(node.operator()),
                     transformExpr(node.expr()));
@@ -673,8 +687,8 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
 
     // For multidimension array: t[e][d][c][b][a] ary;
     // &ary[a0][b0][c0][d0][e0]
-    //     = &ary + edcb*a0 + edc*b0 + ed*c0 + e*d0 + e0
-    //     = &ary + (((((a0)*b + b0)*c + c0)*d + d0)*e + e0) * sizeof(t)
+    // = &ary + edcb*a0 + edc*b0 + ed*c0 + e*d0 + e0
+    // = &ary + (((((a0)*b + b0)*c + c0)*d + d0)*e + e0) * sizeof(t)
     //
     private Expr transformIndex(ArefNode node) {
         if (node.isMultiDimension()) {
@@ -682,9 +696,8 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
                     transformExpr(node.index()),
                     new Bin(int_t(), Op.MUL,
                             new Int(int_t(), node.length()),
-                            transformIndex((ArefNode)node.expr())));
-        }
-        else {
+                            transformIndex((ArefNode) node.expr())));
+        } else {
             return transformExpr(node.index());
         }
     }
@@ -726,12 +739,10 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
             return new Uni(asmType(node.type()),
                     node.expr().type().isSigned() ? Op.S_CAST : Op.U_CAST,
                     transformExpr(node.expr()));
-        }
-        else if (isStatement()) {
+        } else if (isStatement()) {
             transformStmt(node.expr());
             return null;
-        }
-        else {
+        } else {
             return transformExpr(node.expr());
         }
     }
@@ -770,11 +781,11 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
 
     private boolean isPointerArithmetic(Op op, Type operandType) {
         switch (op) {
-        case ADD:
-        case SUB:
-            return operandType.isPointer();
-        default:
-            return false;
+            case ADD:
+            case SUB:
+                return operandType.isPointer();
+            default:
+                return false;
         }
     }
 
@@ -827,8 +838,7 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
     private Int imm(Type operandType, long n) {
         if (operandType.isPointer()) {
             return new Int(ptrdiff_t(), n);
-        }
-        else {
+        } else {
             return new Int(int_t(), n);
         }
     }
@@ -839,31 +849,32 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
     }
 
     private net.loveruby.cflat.asm.Type asmType(Type t) {
-        if (t.isVoid()) return int_t();
+        if (t.isVoid())
+            return int_t();
         return net.loveruby.cflat.asm.Type.get(t.size());
     }
 
     private net.loveruby.cflat.asm.Type varType(Type t) {
-        if (! t.isScalar()) {
+        if (!t.isScalar()) {
             return null;
         }
         return net.loveruby.cflat.asm.Type.get(t.size());
     }
 
     private net.loveruby.cflat.asm.Type int_t() {
-        return net.loveruby.cflat.asm.Type.get((int)typeTable.intSize());
+        return net.loveruby.cflat.asm.Type.get((int) typeTable.intSize());
     }
 
     private net.loveruby.cflat.asm.Type size_t() {
-        return net.loveruby.cflat.asm.Type.get((int)typeTable.longSize());
+        return net.loveruby.cflat.asm.Type.get((int) typeTable.longSize());
     }
 
     private net.loveruby.cflat.asm.Type ptr_t() {
-        return net.loveruby.cflat.asm.Type.get((int)typeTable.pointerSize());
+        return net.loveruby.cflat.asm.Type.get((int) typeTable.pointerSize());
     }
 
     private net.loveruby.cflat.asm.Type ptrdiff_t() {
-        return net.loveruby.cflat.asm.Type.get((int)typeTable.longSize());
+        return net.loveruby.cflat.asm.Type.get((int) typeTable.longSize());
     }
 
     private void error(Node n, String msg) {
