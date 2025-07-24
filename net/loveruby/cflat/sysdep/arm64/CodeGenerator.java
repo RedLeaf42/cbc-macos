@@ -89,11 +89,9 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             assembly.add(new Directive("\t.asciz\t\"" + escapeString(ent.value()) + "\""));
         }
 
-        // 2. initialized extern globals
+        // 2. initialized globals (both public and private)
         for (DefinedVariable var : ir.definedGlobalVariables()) {
-            if (var.isPrivate())
-                continue;
-            emitInitializedGlobal(var, true, ir);
+            emitInitializedGlobal(var, !var.isPrivate(), ir);
         }
         // 3. static locals (private in IR)
         for (DefinedVariable var : staticLocals) {
@@ -146,8 +144,8 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         var.setMemref(mem(sym));
         var.setAddress(imm(sym));
 
-        assembly.add(new Directive("\t.globl\t_" + var.name()));
-        assembly.add(new Directive("\t.zerofill\t__DATA,__common,_" + var.name() + "," + size + "," + align));
+        assembly.add(new Directive("\t.globl\t" + var.name()));
+        assembly.add(new Directive("\t.zerofill\t__DATA,__common," + var.name() + "," + size + "," + align));
     }
 
     private int log2ceil(long n) {
