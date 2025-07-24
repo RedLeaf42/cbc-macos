@@ -34,7 +34,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     private static final Register SCRATCH = Register.X9; // general scratch in call setup
 
     private final SymbolTable constSymbols = new SymbolTable(".LC");
-    private final SymbolTable labelSymbols = new SymbolTable("");
+    private final SymbolTable labelSymbols = new SymbolTable("L");
 
     // per-function context
     private DefinedFunction currentFunction;
@@ -43,7 +43,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     private final Map<Entity, Long> paramOffsets = new HashMap<>();
     private final List<DefinedVariable> staticLocals = new ArrayList<>();
     private static final Register TMP1 = Register.X10;
-    private static final Register TMP0 = Register.X9;
+    private static final Register TMP0 = Register.X13;
     private static final Register CALL_TMP = Register.X16;
     private static final Register CALL_TMP2 = Register.X17; // IP1 (如果还需要第二个)
 
@@ -381,7 +381,8 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
     @Override
     public Void visit(Jump s) {
-        assembly.add(new Directive("\tb\t" + s.label().symbol().toSource(labelSymbols)));
+        // 对于Jump指令，使用向前跳转
+        assembly.add(new Directive("\tb\t" + s.label().symbol().toSource(labelSymbols) + "f"));
         return null;
     }
 
@@ -394,7 +395,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
     @Override
     public Void visit(LabelStmt s) {
-        assembly.add(new Directive(s.label().symbol().toSource(labelSymbols) + ":"));
+        assembly.add(new Directive(s.label().symbol().toSource(labelSymbols) + "f:"));
         return null;
     }
 
