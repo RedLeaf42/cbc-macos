@@ -73,14 +73,14 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 staticLocals.add(global);
             }
         }
-//        for (DefinedFunction f : ir.definedFunctions()) {
-//            for (DefinedVariable v : f.lvarScope().allVariablesWithPrivate()) {
-//                System.out.println("collectStaticLocals current = "+v.name());
-//                if (!v.isParameter() && v.isPrivate()) {
-//                    staticLocals.add(v);
-//                }
-//            }
-//        }
+        // for (DefinedFunction f : ir.definedFunctions()) {
+        // for (DefinedVariable v : f.lvarScope().allVariablesWithPrivate()) {
+        // System.out.println("collectStaticLocals current = "+v.name());
+        // if (!v.isParameter() && v.isPrivate()) {
+        // staticLocals.add(v);
+        // }
+        // }
+        // }
     }
 
     /* ====== Data ====== */
@@ -98,12 +98,12 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
         // 2. initialized globals (both public and private) 初始化的静态/非静态全局变量
         for (DefinedVariable var : ir.definedGlobalVariables()) {
-            System.out.println("Debug global var = "+var.name());
+            System.out.println("Debug global var = " + var.name());
             emitInitializedGlobal(var, !var.isPrivate(), ir);
         }
         // 3. static locals (private in IR) 没有初始化的静态全局变量
         for (DefinedVariable var : staticLocals) {
-            System.out.println("Debug static var = "+var.name());
+            System.out.println("Debug static var = " + var.name());
             emitInitializedGlobal(var, false, ir);
         }
         // 4. common (tentative) symbols 没有初始化的全局变量,理论上来说不应该包含静态变量的
@@ -112,7 +112,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             if (!var.isPrivate()) {
                 emitCommonSymbol(var);
             } else {
-                System.err.println("exclude static variable "+var.name());
+                System.err.println("exclude static variable " + var.name());
             }
         }
     }
@@ -126,7 +126,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         if (external) {
             assembly.add(new Directive("\t.globl\t_" + var.name()));
         } else {
-            System.out.println("Debug private_extern\t "+var.name());
+            System.out.println("Debug private_extern\t " + var.name());
             assembly.add(new Directive("\t.private_extern\t_" + var.name()));
         }
         assembly.add(new Label(sym));
@@ -338,8 +338,14 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         if (e.isStaticCall()) {
             assembly.add(new Directive("\tbl\t_" + e.function().name()));
         } else {
+            // 对于间接函数调用，需要将函数地址加载到不同的寄存器，避免覆盖x0中的参数
             e.expr().accept(this); // callee -> x0
-            assembly.add(new Directive("\tblr\tx0"));
+            assembly.add(new Directive("\tmov\t" + CALL_TMP + ", x0")); // 将函数地址移动到CALL_TMP
+            // 现在需要将第一个参数重新加载到x0
+            if (!e.args().isEmpty()) {
+                e.args().get(0).accept(this); // 重新加载第一个参数到x0
+            }
+            assembly.add(new Directive("\tblr\t" + CALL_TMP)); // 使用CALL_TMP调用函数
         }
 
         if (block > 0)
@@ -622,8 +628,17 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             long off = paramOffsets.get(ent);
             assembly.add(new Directive("\tadd\tx0, x29, #" + off));
         } else {
-            assembly.add(new Directive("\tadrp\tx0, " + ent.name() + "@PAGE"));
-            assembly.add(new Directive("\tadd\tx0, x0, " + ent.name() + "@PAGEOFF"));
+            // 对于外部符号，根据类型选择重定位方式
+            String symbolName = ent.isPrivate() ? ent.name() : "_" + ent.name();
+            if (ent.type().isFunction()) {
+                // 对于外部函数，使用@GOT重定位
+                assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@GOTPAGE"));
+                assembly.add(new Directive("\tldr\tx0, [x0, " + symbolName + "@GOTPAGEOFF]"));
+            } else {
+                // 对于外部变量，使用@PAGE/@PAGEOFF重定位
+                assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
+                assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+            }
         }
     }
 
@@ -730,8 +745,17 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             long off = paramOffsets.get(ent);
             assembly.add(new Directive("\tadd\t" + dst + ", x29, #" + off));
         } else {
-            assembly.add(new Directive("\tadrp\t" + dst + ", " + ent.name() + "@PAGE"));
-            assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + ent.name() + "@PAGEOFF"));
+            // 对于外部符号，根据类型选择重定位方式
+            String symbolName = ent.isPrivate() ? ent.name() : "_" + ent.name();
+            if (ent.type().isFunction()) {
+                // 对于外部函数，使用@GOT重定位
+                assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@GOTPAGE"));
+                assembly.add(new Directive("\tldr\t" + dst + ", [" + dst + ", " + symbolName + "@GOTPAGEOFF]"));
+            } else {
+                // 对于外部变量，使用@PAGE/@PAGEOFF重定位
+                assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@PAGE"));
+                assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + symbolName + "@PAGEOFF"));
+            }
         }
     }
 
@@ -763,8 +787,18 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 assembly.add(new Directive("\tsxtw\tx0, w0"));
             }
         } else {
-            assembly.add(new Directive("\tadrp\tx0, " + ent.name() + "@PAGE"));
-            assembly.add(new Directive("\tadd\tx0, x0, " + ent.name() + "@PAGEOFF"));
+            // 对于外部符号，根据类型选择重定位方式
+            String symbolName = ent.isPrivate() ? ent.name() : "_" + ent.name();
+            if (ent.type().isFunction()) {
+                // 对于外部函数，使用@GOT重定位，加载到x16避免覆盖x0中的参数
+                assembly.add(new Directive("\tadrp\tx16, " + symbolName + "@GOTPAGE"));
+                assembly.add(new Directive("\tldr\tx16, [x16, " + symbolName + "@GOTPAGEOFF]"));
+                assembly.add(new Directive("\tmov\tx0, x16"));
+            } else {
+                // 对于外部变量，使用@PAGE/@PAGEOFF重定位
+                assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
+                assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+            }
             if (sz == 8) {
                 assembly.add(new Directive("\tldr\tx0, [x0]"));
             } else {
@@ -797,8 +831,17 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             long off = paramOffsets.get(ent);
             assembly.add(new Directive("\tstr\t" + src + ", [x29, #" + off + "]"));
         } else {
-            assembly.add(new Directive("\tadrp\tx0, " + ent.name() + "@PAGE"));
-            assembly.add(new Directive("\tadd\tx0, x0, " + ent.name() + "@PAGEOFF"));
+            // 对于外部符号，根据类型选择重定位方式
+            String symbolName = ent.isPrivate() ? ent.name() : "_" + ent.name();
+            if (ent.type().isFunction()) {
+                // 对于外部函数，使用@GOT重定位
+                assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@GOTPAGE"));
+                assembly.add(new Directive("\tldr\tx0, [x0, " + symbolName + "@GOTPAGEOFF]"));
+            } else {
+                // 对于外部变量，使用@PAGE/@PAGEOFF重定位
+                assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
+                assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+            }
             assembly.add(new Directive("\tstr\t" + src + ", [x0]"));
         }
     }
