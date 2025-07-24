@@ -137,6 +137,8 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     }
 
     private void emitCommonSymbol(DefinedVariable var) {
+        // Debug: emit a comment with the variable name
+        assembly.add(new Directive("\t// emitCommonSymbol: " + var.name()));
         long size = var.type().size();
         int align = Math.max(3, log2ceil(size)); // >= 8 byte
 
