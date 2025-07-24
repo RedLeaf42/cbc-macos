@@ -43,7 +43,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     private final Map<Entity, Long> paramOffsets = new HashMap<>();
     private final List<DefinedVariable> staticLocals = new ArrayList<>();
     private static final Register TMP1 = Register.X10;
-    private static final Register TMP0 = Register.X9;
+    private static final Register TMP0 = Register.X13; // 使用不同的寄存器避免冲突
     private static final Register CALL_TMP = Register.X16;
     private static final Register CALL_TMP2 = Register.X17; // IP1 (如果还需要第二个)
 
@@ -322,17 +322,11 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
     @Override
     public Void visit(Assign s) {
-        // 2) 根据 LHS 类型生成地址并按大小写入
+        // 参考x86的实现，使用虚拟栈避免寄存器冲突
         if (s.lhs() instanceof Var) {
-            // 检查RHS是否是地址计算表达式
-            if (isAddressExpression(s.rhs())) {
-                // 使用evalAddressInto计算地址
-                evalAddressInto(s.rhs(), VAL_TMP.toString());
-            } else {
-                // 直接计算值
-                s.rhs().accept(this);
-                assembly.add(new Directive("\tmov\t" + VAL_TMP + ", x0"));
-            }
+            // 对于Var类型的LHS，直接计算RHS并存储
+            s.rhs().accept(this);
+            assembly.add(new Directive("\tmov\t" + VAL_TMP + ", x0"));
             storeToVar((Var) s.lhs(), VAL_TMP);
             return null;
         }
@@ -637,46 +631,47 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             Op op = b.op();
             if (op == Op.ADD || op == Op.SUB) {
                 evalAddressInto(b.left(), dst); // base -> dst
-                // 使用临时寄存器计算右边的表达式，避免覆盖dst
-                evalAddressInto(b.right(), OFFT.toString()); // 直接计算到OFFT寄存器
+                // 使用临时寄存器计算右边的表达式，避免寄存器冲突
+                b.right().accept(this);
+                assembly.add(new Directive("\tmov\t" + OFFT + ", x0")); // 将右操作数保存到OFFT
                 if (op == Op.ADD)
                     assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + OFFT));
                 else
                     assembly.add(new Directive("\tsub\t" + dst + ", " + dst + ", " + OFFT));
                 return;
             }
-            // 对于其他操作，使用通用处理但避免寄存器冲突
-            b.left().accept(this);
-            assembly.add(new Directive("\tmov\t" + dst + ", x0"));
+            // 对于其他操作，使用栈操作避免寄存器冲突
             b.right().accept(this);
-            assembly.add(new Directive("\tmov\t" + OFFT + ", x0"));
+            assembly.add(new Directive("\tstr\tx0, [sp, #-16]!")); // 将右操作数压栈
+            b.left().accept(this);
+            assembly.add(new Directive("\tldr\t" + OFFT + ", [sp], #16")); // 将右操作数出栈到OFFT
 
             switch (op) {
                 case MUL:
-                    assembly.add(new Directive("\tmul\t" + dst + ", " + dst + ", " + OFFT));
+                    assembly.add(new Directive("\tmul\t" + dst + ", x0, " + OFFT));
                     break;
                 case S_DIV:
-                    assembly.add(new Directive("\tsdiv\t" + dst + ", " + dst + ", " + OFFT));
+                    assembly.add(new Directive("\tsdiv\t" + dst + ", x0, " + OFFT));
                     break;
                 case S_MOD:
-                    assembly.add(new Directive("\tsdiv\t" + TMP0 + ", " + dst + ", " + OFFT));
+                    assembly.add(new Directive("\tsdiv\t" + TMP0 + ", x0, " + OFFT));
                     assembly.add(new Directive("\tmul\t" + TMP0 + ", " + TMP0 + ", " + OFFT));
-                    assembly.add(new Directive("\tsub\t" + dst + ", " + dst + ", " + TMP0));
+                    assembly.add(new Directive("\tsub\t" + dst + ", x0, " + TMP0));
                     break;
                 case BIT_AND:
-                    assembly.add(new Directive("\tand\t" + dst + ", " + dst + ", " + OFFT));
+                    assembly.add(new Directive("\tand\t" + dst + ", x0, " + OFFT));
                     break;
                 case BIT_OR:
-                    assembly.add(new Directive("\torr\t" + dst + ", " + dst + ", " + OFFT));
+                    assembly.add(new Directive("\torr\t" + dst + ", x0, " + OFFT));
                     break;
                 case BIT_XOR:
-                    assembly.add(new Directive("\teor\t" + dst + ", " + dst + ", " + OFFT));
+                    assembly.add(new Directive("\teor\t" + dst + ", x0, " + OFFT));
                     break;
                 case BIT_LSHIFT:
-                    assembly.add(new Directive("\tlsl\t" + dst + ", " + dst + ", " + OFFT));
+                    assembly.add(new Directive("\tlsl\t" + dst + ", x0, " + OFFT));
                     break;
                 case ARITH_RSHIFT:
-                    assembly.add(new Directive("\tasr\t" + dst + ", " + dst + ", " + OFFT));
+                    assembly.add(new Directive("\tasr\t" + dst + ", x0, " + OFFT));
                     break;
                 default:
                     // 对于比较操作，我们不应该在这里处理地址计算
