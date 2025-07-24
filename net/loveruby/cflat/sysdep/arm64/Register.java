@@ -10,6 +10,10 @@ public class Register extends net.loveruby.cflat.asm.Register {
     private boolean isCalleeSaved;
     private boolean isAllocatable;
 
+    public String name() {
+        return name;
+    }
+
     public Register(String name, boolean isGeneral, boolean isCallerSaved,
             boolean isCalleeSaved, boolean isAllocatable) {
         this.name = name;

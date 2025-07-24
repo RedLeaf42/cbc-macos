@@ -3,142 +3,169 @@ package net.loveruby.cflat.sysdep.arm64;
 import net.loveruby.cflat.asm.*;
 import net.loveruby.cflat.entity.*;
 import net.loveruby.cflat.ir.*;
-import net.loveruby.cflat.type.*;
+import net.loveruby.cflat.type.FunctionType;
 import net.loveruby.cflat.utils.ErrorHandler;
 
 import java.util.*;
 
+/**
+ * ARM64 CodeGenerator for macOS (Apple ABI)
+ * - Variadic call: 64B shadow space for vararg tail only
+ * - Mach-O sections/visibility
+ * - Static locals emitted to data, not stack
+ * - Prologue/Epilogue use push/pop pattern to avoid stp/ldp offset overflow
+ * - Address calculation no longer trashes x0 in the middle
+ */
 public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, IRVisitor<Void, Void> {
-    private AssemblyCode assembly;
-    private ErrorHandler errorHandler;
-    private net.loveruby.cflat.asm.Type naturalType;
-    private net.loveruby.cflat.sysdep.CodeGeneratorOptions options;
 
-    // ARM64 calling convention
-    private static final Register[] ARG_REGS = {Register.X0, Register.X1, Register.X2, Register.X3,
-            Register.X4, Register.X5, Register.X6, Register.X7};
-    private static final Register RETURN_REG = Register.X0;
-    private static final Register STACK_POINTER = Register.SP;
-    private static final Register FRAME_POINTER = Register.FP;
-    private static final Register LINK_REGISTER = Register.LR;
+    /* ====== Config ====== */
+    private final AssemblyCode assembly;
+    private final ErrorHandler errorHandler;
+    private final net.loveruby.cflat.asm.Type naturalType;
+    private final net.loveruby.cflat.sysdep.CodeGeneratorOptions options;
 
-    // Symbol tables
-    private SymbolTable constSymbols;
-    private SymbolTable labelSymbols;
+    private static final Register[] ARG_REGS = {
+            Register.X0, Register.X1, Register.X2, Register.X3,
+            Register.X4, Register.X5, Register.X6, Register.X7
+    };
+    private static final Register VAL_TMP = Register.X9; // 仅用于保存值(RHS等)
+    private static final Register ADR_TMP0 = Register.X11; // 地址计算用
+    private static final Register ADR_TMP1 = Register.X12; // 地址计算用
+    private static final Register SCRATCH = Register.X9; // general scratch in call setup
 
-    // Current function info
+    private final SymbolTable constSymbols = new SymbolTable(".LC");
+    private final SymbolTable labelSymbols = new SymbolTable("");
+
+    // per-function context
     private DefinedFunction currentFunction;
-    private long stackSize;
-    private Map<Entity, Long> localVarOffsets;
-    private Map<Entity, Long> paramOffsets;
-
-    private Set<Register> usedRegisters;
+    private long frameSize; // size we sub after pushing FP/LR
+    private final Map<Entity, Long> localVarOffsets = new HashMap<>();
+    private final Map<Entity, Long> paramOffsets = new HashMap<>();
+    private final List<DefinedVariable> staticLocals = new ArrayList<>();
+    private static final Register TMP1 = Register.X10;
+    private static final Register TMP0 = Register.X9;
+    private static final Register CALL_TMP = Register.X16;
+    private static final Register CALL_TMP2 = Register.X17; // IP1 (如果还需要第二个)
 
     public CodeGenerator(net.loveruby.cflat.sysdep.CodeGeneratorOptions opts,
-                         net.loveruby.cflat.asm.Type naturalType, ErrorHandler h) {
+            net.loveruby.cflat.asm.Type naturalType,
+            ErrorHandler h) {
         this.options = opts;
         this.naturalType = naturalType;
         this.errorHandler = h;
         this.assembly = new AssemblyCode(h);
-        this.constSymbols = new SymbolTable(".LC");
-        this.labelSymbols = new SymbolTable("");
-        this.localVarOffsets = new HashMap<>();
-        this.paramOffsets = new HashMap<>();
-        this.usedRegisters = new HashSet<>();
     }
 
-    public AssemblyCode generate(net.loveruby.cflat.ir.IR ir) {
+    /* ====== Entry ====== */
+    @Override
+    public AssemblyCode generate(IR ir) {
+        collectStaticLocals(ir);
         generateDataSection(ir);
         generateTextSection(ir);
         return assembly;
     }
 
-    /** return log2(align), minimum 'minExp' */
-    private int pow2AlignExp(long size, int minExp) {
-        // nextPow2
-        long n = 1;
-        while (n < size) n <<= 1;
-        int e = 0;
-        while ((1L << e) < n) e++;
-        return Math.max(e, minExp);
+    private void collectStaticLocals(IR ir) {
+        staticLocals.clear();
+        for (DefinedFunction f : ir.definedFunctions()) {
+            for (DefinedVariable v : f.lvarScope().allVariablesWithPrivate()) {
+                if (!v.isParameter() && v.isPrivate()) {
+                    staticLocals.add(v);
+                }
+            }
+        }
     }
 
-    private void generateDataSection(net.loveruby.cflat.ir.IR ir) {
-        // ---------- 1. string literals ----------
+    /* ====== Data ====== */
+    private void generateDataSection(IR ir) {
+        // 1. string literals
         for (ConstantEntry ent : ir.constantTable().entries()) {
-            Symbol sym = constSymbols.newSymbol();  // .LCx
+            Symbol sym = constSymbols.newSymbol();
             ent.setSymbol(sym);
             ent.setMemref(mem(sym));
             ent.setAddress(imm(sym));
-
             assembly.add(new Directive("\t.section\t__TEXT,__cstring,cstring_literals"));
             assembly.add(new Label(sym));
             assembly.add(new Directive("\t.asciz\t\"" + escapeString(ent.value()) + "\""));
         }
 
-        // ---------- 2. initialized globals ----------
+        // 2. initialized extern globals
         for (DefinedVariable var : ir.definedGlobalVariables()) {
-            Symbol sym = new NamedSymbol(var.name());
-            var.setMemref(mem(sym));
-            var.setAddress(imm(sym));
-
-            assembly.add(new Directive("\t.section\t__DATA,__data"));
-            // external global?
-            assembly.add(new Directive("\t.globl\t_" + var.name()));
-            assembly.add(new Label(sym));
-
-            if (var.hasInitializer()) {
-                Object init = var.initializer(); // depends on your IR/AST types
-
-                if (init instanceof net.loveruby.cflat.ast.IntegerLiteralNode) {
-                    long v = ((net.loveruby.cflat.ast.IntegerLiteralNode) init).value();
-                    assembly.add(new Directive("\t.quad\t" + v));
-                }
-                else if (init instanceof net.loveruby.cflat.ast.StringLiteralNode) {
-                    // find the ConstantEntry again (or create if needed)
-                    String s = ((net.loveruby.cflat.ast.StringLiteralNode) init).value();
-                    ConstantEntry ce = ir.constantTable().intern(s);
-                    Symbol cs = ce.symbol();
-                    assembly.add(new Directive("\t.quad\t" + cs.toSource()));
-                }
-                else if (init instanceof net.loveruby.cflat.ir.Str) {
-                    Symbol cs = ((net.loveruby.cflat.ir.Str) init).entry().symbol();
-                    assembly.add(new Directive("\t.quad\t" + cs.toSource()));
-                }
-                else {
-                    // TODO: handle arrays/structs/etc. if your IR supports
-                    assembly.add(new Directive("\t.quad\t0"));
-                }
-            }
-            else {
-                // explicitly zero-initialized global with no initializer
-                assembly.add(new Directive("\t.space\t" + var.type().size()));
-            }
+            if (var.isPrivate())
+                continue;
+            emitInitializedGlobal(var, true, ir);
         }
-
-        // ---------- 3. common symbols (uninitialized extern) ----------
+        // 3. static locals (private in IR)
+        for (DefinedVariable var : staticLocals) {
+            emitInitializedGlobal(var, false, ir);
+        }
+        // 4. common (tentative) symbols
         for (DefinedVariable var : ir.definedCommonSymbols()) {
-            long size  = var.type().size();
-            int  align = pow2AlignExp(size, 3); // at least 8-byte align on AArch64
-
-            Symbol sym = new NamedSymbol(var.name());
-            var.setMemref(mem(sym));
-            var.setAddress(imm(sym));
-
-            // external by default
-            assembly.add(new Directive("\t.globl\t_" + var.name()));
-            // Mach-O way: zerofill in __common
-            assembly.add(new Directive("\t.zerofill\t__DATA,__common,_"
-                    + var.name() + "," + size + "," + align));
+            emitCommonSymbol(var);
         }
     }
 
+    private void emitInitializedGlobal(DefinedVariable var, boolean external, IR ir) {
+        Symbol sym = new NamedSymbol(var.name());
+        var.setMemref(mem(sym));
+        var.setAddress(imm(sym));
 
-    private void generateTextSection(net.loveruby.cflat.ir.IR ir) {
+        assembly.add(new Directive("\t.section\t__DATA,__data"));
+        if (external) {
+            assembly.add(new Directive("\t.globl\t_" + var.name()));
+        } else {
+            assembly.add(new Directive("\t.private_extern\t_" + var.name()));
+        }
+        assembly.add(new Label(sym));
+
+        if (var.hasInitializer()) {
+            Object init = var.initializer();
+            if (init instanceof net.loveruby.cflat.ast.IntegerLiteralNode) {
+                long v = ((net.loveruby.cflat.ast.IntegerLiteralNode) init).value();
+                assembly.add(new Directive("\t.quad\t" + v));
+            } else if (init instanceof net.loveruby.cflat.ast.StringLiteralNode) {
+                String s = ((net.loveruby.cflat.ast.StringLiteralNode) init).value();
+                ConstantEntry ce = ir.constantTable().intern(s);
+                assembly.add(new Directive("\t.quad\t" + ce.symbol().toSource()));
+            } else if (init instanceof net.loveruby.cflat.ir.Str) {
+                Symbol cs = ((net.loveruby.cflat.ir.Str) init).entry().symbol();
+                assembly.add(new Directive("\t.quad\t" + cs.toSource()));
+            } else {
+                assembly.add(new Directive("\t.quad\t0"));
+            }
+        } else {
+            assembly.add(new Directive("\t.space\t" + var.type().size()));
+        }
+    }
+
+    private void emitCommonSymbol(DefinedVariable var) {
+        long size = var.type().size();
+        int align = Math.max(3, log2ceil(size)); // >= 8 byte
+
+        Symbol sym = new NamedSymbol(var.name());
+        var.setMemref(mem(sym));
+        var.setAddress(imm(sym));
+
+        assembly.add(new Directive("\t.globl\t_" + var.name()));
+        assembly.add(new Directive("\t.zerofill\t__DATA,__common,_" + var.name() + "," + size + "," + align));
+    }
+
+    private int log2ceil(long n) {
+        int e = 0;
+        long v = 1;
+        while (v < n) {
+            v <<= 1;
+            e++;
+        }
+        return e;
+    }
+
+    /* ====== Text ====== */
+    private void generateTextSection(IR ir) {
         assembly.add(new Directive("\t.section\t__TEXT,__text,regular,pure_instructions"));
         assembly.add(new Directive("\t.build_version macos, 11, 0"));
-        for (DefinedFunction func : ir.definedFunctions()) {
-            generateFunction(func);
+        for (DefinedFunction f : ir.definedFunctions()) {
+            generateFunction(f);
         }
     }
 
@@ -146,162 +173,228 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         currentFunction = func;
         localVarOffsets.clear();
         paramOffsets.clear();
-        usedRegisters.clear();
-        calculateStackLayout(func);
 
-        Symbol funcSym = new NamedSymbol("_" + func.name());
-        func.setCallingSymbol(funcSym);
-        func.setMemref(mem(funcSym));
-        func.setAddress(imm(funcSym));
+        calcFrameLayout(func);
+
+        Symbol fn = new NamedSymbol("_" + func.name());
+        func.setCallingSymbol(fn);
+        func.setMemref(mem(fn));
+        func.setAddress(imm(fn));
 
         assembly.add(new Directive("\t.globl\t_" + func.name()));
         assembly.add(new Directive("\t.p2align\t2"));
-        assembly.add(new Label(funcSym));
+        assembly.add(new Label(fn));
 
-        generatePrologue(func);
-        for (Stmt stmt : func.ir()) {
-            stmt.accept(this);
-        }
+        genPrologue();
+        for (Stmt s : func.ir())
+            s.accept(this);
         assembly.add(new Label(new NamedSymbol(".L" + func.name() + "_epilogue")));
-        generateEpilogue(func);
+        genEpilogue();
     }
 
-    private void calculateStackLayout(DefinedFunction func) {
-        List<DefinedVariable> allLocals = func.lvarScope().allVariablesWithPrivate();
+    /**
+     * frameSize 不包含 FP/LR 16B；那 16B 是额外 push 的
+     * 正确的ARM64栈帧布局：
+     * [x29, #+16] - 参数1
+     * [x29, #+24] - 参数2
+     * [x29, #+0] - 保存的FP
+     * [x29, #+8] - 返回地址
+     * [x29, #-8] - 局部变量1
+     * [x29, #-16] - 局部变量2
+     */
+    private void calcFrameLayout(DefinedFunction f) {
+        // 局部变量从负偏移开始，从-8开始
         long localSize = 0;
-        for (DefinedVariable v : allLocals) {
-            if (v.isParameter()) continue;
-            long size = (v.type().allocSize() + 7) & ~7;
-            localVarOffsets.put(v, localSize);
-            localSize += size;
+        for (DefinedVariable v : f.lvarScope().allVariablesWithPrivate()) {
+            if (v.isParameter())
+                continue;
+            if (v.isPrivate())
+                continue; // static local -> data
+            long sz = (v.type().allocSize() + 7) & ~7;
+            localVarOffsets.put(v, -8 - localSize); // 负数偏移
+            localSize += sz;
         }
 
-        List<Parameter> params = func.parameters();
-        long paramSize = params.size() * 8;
-        for (int i = 0; i < params.size(); i++) {
-            paramOffsets.put(params.get(i), localSize + i * 8);
+        // 参数从正偏移开始，从+16开始（跳过保存的FP和返回地址）
+        List<Parameter> ps = f.parameters();
+        for (int i = 0; i < ps.size(); i++) {
+            paramOffsets.put(ps.get(i), 16 + i * 8L); // 正数偏移
         }
 
-        stackSize = localSize + paramSize + 16;
-        stackSize = (stackSize + 15) & ~15;
+        // frameSize只需要局部变量的大小，参数在调用者栈帧中
+        frameSize = localSize;
+        frameSize = (frameSize + 15) & ~15;
     }
 
-    private void generatePrologue(DefinedFunction func) {
-        assembly.add(new Directive("\tsub\tsp, sp, #" + stackSize));
-        assembly.add(new Directive("\tstp\tx29, x30, [sp, #" + (stackSize - 16) + "]"));
+    private void genPrologue() {
+        assembly.add(new Directive("\tstp\tx29, x30, [sp, #-16]!"));
         assembly.add(new Directive("\tmov\tx29, sp"));
+        if (frameSize > 0)
+            assembly.add(new Directive("\tsub\tsp, sp, #" + frameSize));
 
-        // 修复：定义params变量
-        List<Parameter> params = func.parameters();
-        for (int i = 0; i < params.size() && i < ARG_REGS.length; i++) {
-            long offset = paramOffsets.get(params.get(i));
-            assembly.add(new Directive("\tstr\t" + ARG_REGS[i] + ", [x29, #" + offset + "]"));
+        // 参数已经在调用者栈帧中，不需要额外保存
+        // 参数可以通过 [x29, #+16], [x29, #+24] 等直接访问
+    }
+
+    private void genEpilogue() {
+        if (frameSize > 0)
+            assembly.add(new Directive("\tadd\tsp, sp, #" + frameSize));
+        assembly.add(new Directive("\tldp\tx29, x30, [sp], #16"));
+        assembly.add(new Directive("\tret"));
+    }
+
+    /* ====== IR Visitor ====== */
+
+    @Override
+    public Void visit(Call e) {
+        List<Expr> args = e.args();
+        boolean isVar = e.isStaticCall() &&
+                e.function().type().getFunctionType().isVararg();
+
+        int total = args.size();
+        int fixed = 0;
+        if (e.isStaticCall()) {
+            fixed = e.function().type().getFunctionType().paramTypes().size();
         }
-    }
 
-//    private void generateEpilogue(DefinedFunction func) {
-//        assembly.add(new Directive("\tldp\tx29, x30, [sp, #" + (stackSize - 16) + "]"));
-//        assembly.add(new Directive("\tadd\tsp, sp, #" + stackSize));
-//        assembly.add(new Directive("\tret"));
-//    }
+        int stackArgs = Math.max(0, total - ARG_REGS.length);
+        int shadow = isVar ? 64 : 0;
+        int temp = total * 8;
+        int block = shadow + stackArgs * 8 + temp;
+        block = (block + 15) & ~15;
 
-    @Override
-    public Void visit(ExprStmt stmt) {
-        stmt.expr().accept(this);
-        return null;
-    }
+        if (block > 0)
+            assembly.add(new Directive("\tsub\tsp, sp, #" + block));
 
-    @Override
-    public Void visit(Assign stmt) {
-        stmt.rhs().accept(this);
-        assembly.add(new Directive("\tmov\tx1, x0"));
+        int tempBase = shadow + stackArgs * 8;
 
-        if (stmt.lhs().isVar()) {
-            Var var = (Var) stmt.lhs();
-            Entity entity = var.entity();
+        // Pass1: R->L
+        for (int i = total - 1; i >= 0; --i) {
+            args.get(i).accept(this); // x0
+            assembly.add(new Directive("\tstr\tx0, [sp, #" + (tempBase + i * 8L) + "]"));
+        }
 
-            if (localVarOffsets.containsKey(entity)) {
-                long offset = localVarOffsets.get(entity);
-                if (var.type().size() == 8) {
-                    assembly.add(new Directive("\tstr\tx1, [x29, #" + offset + "]"));
-                } else {
-                    assembly.add(new Directive("\tstr\tw1, [x29, #" + offset + "]"));
+        // Pass2: L->R
+        for (int i = 0; i < total; ++i) {
+            long src = tempBase + i * 8L;
+            if (i == 0) {
+                assembly.add(new Directive("\tldr\tx0, [sp, #" + src + "]"));
+            } else {
+                assembly.add(new Directive("\tldr\t" + CALL_TMP + ", [sp, #" + src + "]"));
+            }
+
+            String dst;
+            if (i < ARG_REGS.length) {
+                dst = ARG_REGS[i].toString();
+                if (i != 0) {
+                    assembly.add(new Directive("\tmov\t" + dst + ", " + CALL_TMP));
                 }
-            } else if (paramOffsets.containsKey(entity)) {
-                long offset = paramOffsets.get(entity);
-                assembly.add(new Directive("\tstr\tx1, [x29, #" + offset + "]"));
             } else {
-                assembly.add(new Directive("\tadrp\tx0, " + entity.name() + "@PAGE"));
-                assembly.add(new Directive("\tadd\tx0, x0, " + entity.name() + "@PAGEOFF"));
-                assembly.add(new Directive("\tstr\tx1, [x0]"));
+                dst = (i == 0) ? "x0" : CALL_TMP.toString();
             }
-        } else if (stmt.lhs().isAddr()) {
-            Addr addr = (Addr) stmt.lhs();
-            Entity entity = addr.entity();
-            if (localVarOffsets.containsKey(entity)) {
-                long offset = localVarOffsets.get(entity);
-                assembly.add(new Directive("\tstr\tx1, [x29, #" + offset + "]"));
-            } else if (paramOffsets.containsKey(entity)) {
-                long offset = paramOffsets.get(entity);
-                assembly.add(new Directive("\tstr\tx1, [x29, #" + offset + "]"));
-            } else {
-                assembly.add(new Directive("\tadrp\tx0, " + entity.name() + "@PAGE"));
-                assembly.add(new Directive("\tadd\tx0, x0, " + entity.name() + "@PAGEOFF"));
-                assembly.add(new Directive("\tstr\tx1, [x0]"));
+
+            if (isVar && i >= fixed) {
+                long sh = (i - fixed) * 8L;
+                assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + sh + "]"));
             }
+            if (i >= ARG_REGS.length) {
+                long off = shadow + (long) (i - ARG_REGS.length) * 8;
+                assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + off + "]"));
+            }
+        }
+
+        if (e.isStaticCall()) {
+            assembly.add(new Directive("\tbl\t_" + e.function().name()));
         } else {
-            if (stmt.lhs() instanceof Mem) {
-                Mem mem = (Mem) stmt.lhs();
-                if (mem.expr() instanceof Mem) {
-                    Mem innerMem = (Mem) mem.expr();
-                    innerMem.expr().accept(this);
-                    assembly.add(new Directive("\tmov\tx2, x0"));
-                    assembly.add(new Directive("\tldr\tx0, [x2]"));
-                } else {
-                    mem.expr().accept(this);
-                }
-            } else {
-                stmt.lhs().accept(this);
-            }
-            assembly.add(new Directive("\tstr\tx1, [x0]"));
+            e.expr().accept(this); // callee -> x0
+            assembly.add(new Directive("\tblr\tx0"));
         }
 
+        if (block > 0)
+            assembly.add(new Directive("\tadd\tsp, sp, #" + block));
+
         return null;
     }
 
     @Override
-    public Void visit(CJump stmt) {
-        stmt.cond().accept(this);
+    public Void visit(Assign s) {
+        // 1) 先算 RHS，值在 x0
+        s.rhs().accept(this);
+        assembly.add(new Directive("\tmov\t" + VAL_TMP + ", x0")); // 保存值
+
+        // 2) 根据 LHS 类型生成地址并按大小写入
+        if (s.lhs() instanceof Var) {
+            storeToVar((Var) s.lhs(), VAL_TMP);
+            return null;
+        }
+
+        long sz = s.lhs().type().size(); // 1/2/4/8
+        // 生成地址到 x11
+        if (s.lhs() instanceof Addr) {
+            addrOfEntityInto(((Addr) s.lhs()).entity(), "x11");
+        } else if (s.lhs() instanceof Mem) {
+            evalAddressInto(((Mem) s.lhs()).expr(), "x11");
+        } else {
+            errorHandler.error("unsupported LHS in Assign");
+            return null;
+        }
+
+        // 根据大小选择指令/寄存器宽度
+        String xsrc = VAL_TMP.toString(); // x9
+        String wsrc = "w" + VAL_TMP.name().substring(1); // w9
+
+        if (sz == 8) {
+            assembly.add(new Directive("\tstr\t" + xsrc + ", [x11]"));
+        } else if (sz == 4) {
+            assembly.add(new Directive("\tstr\t" + wsrc + ", [x11]"));
+        } else if (sz == 2) {
+            assembly.add(new Directive("\tstrh\t" + wsrc + ", [x11]"));
+        } else if (sz == 1) {
+            assembly.add(new Directive("\tstrb\t" + wsrc + ", [x11]"));
+        } else {
+            errorHandler.error("unsupported store size: " + sz);
+        }
+        return null;
+    }
+
+    @Override
+    public Void visit(ExprStmt s) {
+        s.expr().accept(this);
+        return null;
+    }
+
+    @Override
+    public Void visit(CJump s) {
+        s.cond().accept(this);
         assembly.add(new Directive("\tcmp\tx0, #0"));
-        assembly.add(new Directive("\tb.ne\t" + stmt.thenLabel().symbol().toSource(labelSymbols) + "f"));
-        assembly.add(new Directive("\tb\t" + stmt.elseLabel().symbol().toSource(labelSymbols) + "f"));
+        assembly.add(new Directive("\tb.ne\t" + s.thenLabel().symbol().toSource(labelSymbols) + "f"));
+        assembly.add(new Directive("\tb\t" + s.elseLabel().symbol().toSource(labelSymbols) + "f"));
         return null;
     }
 
     @Override
-    public Void visit(Jump stmt) {
-        assembly.add(new Directive("\tb\t" + stmt.label().symbol().toSource(labelSymbols) + "f"));
+    public Void visit(Jump s) {
+        assembly.add(new Directive("\tb\t" + s.label().symbol().toSource(labelSymbols) + "f"));
         return null;
     }
 
     @Override
-    public Void visit(Switch stmt) {
-        stmt.cond().accept(this);
-        assembly.add(new Directive("\tb\t" + stmt.defaultLabel().symbol()));
+    public Void visit(Switch s) {
+        s.cond().accept(this);
+        assembly.add(new Directive("\tb\t" + s.defaultLabel().symbol()));
         return null;
     }
 
     @Override
-    public Void visit(LabelStmt stmt) {
-        String label = stmt.label().symbol().toSource(labelSymbols);
-        assembly.add(new Directive(label + ":"));
+    public Void visit(LabelStmt s) {
+        assembly.add(new Directive(s.label().symbol().toSource(labelSymbols) + ":"));
         return null;
     }
 
     @Override
-    public Void visit(Return stmt) {
-        if (stmt.expr() != null) {
-            stmt.expr().accept(this);
+    public Void visit(Return s) {
+        if (s.expr() != null) {
+            s.expr().accept(this);
         } else {
             assembly.add(new Directive("\tmov\tx0, #0"));
         }
@@ -310,15 +403,14 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     }
 
     @Override
-    public Void visit(Uni expr) {
-        expr.expr().accept(this);
-
-        switch (expr.op()) {
+    public Void visit(Uni e) {
+        e.expr().accept(this);
+        switch (e.op()) {
             case UMINUS:
                 assembly.add(new Directive("\tneg\tx0, x0"));
                 break;
             case BIT_NOT:
-                if (expr.type().size() == 4) {
+                if (e.type().size() == 4) {
                     assembly.add(new Directive("\tmvn\tw0, w0"));
                     assembly.add(new Directive("\tsxtw\tx0, w0"));
                 } else {
@@ -330,12 +422,10 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 assembly.add(new Directive("\tcset\tx0, eq"));
                 break;
             case S_CAST:
-                if (expr.expr().type().size() == 4 && expr.type().size() == 8) {
-                    // 保持空实现，依赖后续扩展
-                }
+                // nothing, IR already sign-extended where needed
                 break;
             case U_CAST:
-                if (expr.expr().type().size() == 4 && expr.type().size() == 8) {
+                if (e.expr().type().size() == 4 && e.type().size() == 8) {
                     assembly.add(new Directive("\tuxtw\tx0, w0"));
                 }
                 break;
@@ -344,13 +434,13 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     }
 
     @Override
-    public Void visit(Bin expr) {
-        expr.left().accept(this);
+    public Void visit(Bin e) {
+        e.left().accept(this);
         assembly.add(new Directive("\tmov\tx1, x0"));
-        expr.right().accept(this);
+        e.right().accept(this);
         assembly.add(new Directive("\tmov\tx2, x0"));
 
-        switch (expr.op()) {
+        switch (e.op()) {
             case ADD:
                 assembly.add(new Directive("\tadd\tx0, x1, x2"));
                 break;
@@ -364,9 +454,9 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 assembly.add(new Directive("\tsdiv\tx0, x1, x2"));
                 break;
             case S_MOD:
-                assembly.add(new Directive("\tsdiv\tx3, x1, x2"));
-                assembly.add(new Directive("\tmul\tx3, x3, x2"));
-                assembly.add(new Directive("\tsub\tx0, x1, x3"));
+                assembly.add(new Directive("\tsdiv\t" + TMP0 + ", x1, x2"));
+                assembly.add(new Directive("\tmul\t" + TMP0 + ", " + TMP0 + ", x2"));
+                assembly.add(new Directive("\tsub\tx0, x1, " + TMP0));
                 break;
             case BIT_AND:
                 assembly.add(new Directive("\tand\tx0, x1, x2"));
@@ -409,234 +499,295 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 break;
             default:
                 assembly.add(new Directive("\tmov\tx0, x1"));
-                break;
-        }
-        return null;
-    }
-
-    /**
-     * CodeGenerator.java (ARM64 for macOS) — Variadic call final fix
-     * <p>
-     * Strategy:
-     * 1. Evaluate ALL arguments to a temporary area on stack (right-to-left) so later evaluations
-     * cannot clobber earlier values.
-     * 2. After all args are materialized, load them back into the proper ABI registers (x0–x7) and
-     * copy every register arg into the 64-byte shadow space. Extra args (>8) go after shadow.
-     * 3. For non-variadic calls we still only spill args >8.
-     * <p>
-     * This avoids:
-     * - Overwriting x0 (format string) when evaluating later args.
-     * - Re-using ARG_REGS that our IR evaluation code also uses as scratch (x1/x2/x3...).
-     */
-    @Override
-    public Void visit(Call expr) {
-        final List<Expr> args = expr.args();
-        final boolean isVariadic = expr.isStaticCall() &&
-                expr.function().type().getFunctionType().isVararg();
-
-        /*------------------------------------------------------------
-         *  Stack layout planning
-         *----------------------------------------------------------*/
-        int totalArgs = args.size();
-        int fixedArgCount = 0;
-        if (expr.isStaticCall()) {
-            fixedArgCount = expr.function().type().getFunctionType().paramTypes().size();
-        }
-
-        int shadowSize = isVariadic ? 64 : 0;                  // Apple ABI shadow
-        int extraArgs = Math.max(0, totalArgs - ARG_REGS.length);
-        int tempSize = totalArgs * 8;                        // temp spill for all args
-
-        int totalStack = shadowSize + extraArgs * 8 + tempSize;
-        totalStack = (totalStack + 15) & ~15;              // 16‑byte align
-
-        if (totalStack > 0)
-            assembly.add(new Directive("	sub	sp, sp, #" + totalStack));
-
-        final int tempBase = shadowSize + extraArgs * 8;       // temp region offset
-        final String SCR = "x9";                             // dedicated scratch to avoid clobbering x0
-
-        /*------------------------------------------------------------
-         *  Pass 1 – evaluate right‑to‑left, spill to temp
-         *----------------------------------------------------------*/
-        for (int i = totalArgs - 1; i >= 0; --i) {
-            args.get(i).accept(this);             // result -> x0 (safe, we'll spill immediately)
-            assembly.add(new Directive("	str	x0, [sp, #" + (tempBase + i * 8L) + "]"));
-        }
-
-        /*------------------------------------------------------------
-         *  Pass 2 – load temp, assign regs, build shadow/stack
-         *----------------------------------------------------------*/
-        for (int i = 0; i < totalArgs; ++i) {
-            long srcOff = tempBase + i * 8L;
-
-            if (i == 0) {
-                // first argument ALWAYS to x0 (usually format string)
-                assembly.add(new Directive("	ldr	x0, [sp, #" + srcOff + "]"));
-            } else {
-                assembly.add(new Directive("	ldr	" + SCR + ", [sp, #" + srcOff + "]"));
-            }
-
-            String dstReg;
-            if (i < ARG_REGS.length) {
-                dstReg = ARG_REGS[i].toString();
-                if (i == 0) {
-                    /* already in x0 */
-                } else {
-                    assembly.add(new Directive("	mov	" + dstReg + ", " + SCR));
-                }
-            } else {
-                dstReg = (i == 0) ? "x0" : SCR;   // will be pushed to stack below
-            }
-
-            /* ---- copy to shadow / stack slots ---- */
-            if (isVariadic) {
-                // only variadic arguments (>=fixedArgCount) need shadow copy
-                if (i >= fixedArgCount) {
-                    int varIdx = i - fixedArgCount;
-                    long shOff = varIdx * 8L;                     // sequential slots
-                    String src = dstReg;
-                    assembly.add(new Directive("	str	" + src + ", [sp, #" + shOff + "]"));
-                }
-            }
-
-            // stack args beyond register window
-            if (i >= ARG_REGS.length) {
-                long off = shadowSize + (long) (i - ARG_REGS.length) * 8;
-                assembly.add(new Directive("	str	" + dstReg + ", [sp, #" + off + "]"));
-            }
-        }
-
-        /*------------------------------------------------------------
-         *  Make the call
-         *----------------------------------------------------------*/
-        if (expr.isStaticCall()) {
-            assembly.add(new Directive("	bl	_" + expr.function().name()));
-        } else {
-            expr.expr().accept(this);         // target -> x0
-            assembly.add(new Directive("	blr	x0"));
-        }
-
-        if (totalStack > 0)
-            assembly.add(new Directive("	add	sp, sp, #" + totalStack));
-
-        return null;
-    }
-
-
-    @Override
-    public Void visit(Addr expr) {
-        Entity ent = expr.entity();
-        if (localVarOffsets.containsKey(ent)) {
-            long off = localVarOffsets.get(ent);
-            assembly.add(new Directive("\tadd\tx0, x29, #" + off));
-        } else if (paramOffsets.containsKey(ent)) {
-            long off = paramOffsets.get(ent);
-            assembly.add(new Directive("\tadd\tx0, x29, #" + off));
-        } else {
-            assembly.add(new Directive("\tadrp\tx0, " + ent.name() + "@PAGE"));
-            assembly.add(new Directive("\tadd\tx0, x0, " + ent.name() + "@PAGEOFF"));
         }
         return null;
     }
 
     @Override
-    public Void visit(Mem expr) {
-        expr.expr().accept(this);
-        if (expr.type().size() == 1) {
-            assembly.add(new Directive("\tldrb\tw0, [x0]"));
+    public Void visit(Addr e) {
+        addrOfEntity(e.entity());
+        return null;
+    }
+
+    @Override
+    public Void visit(Mem e) {
+        // 计算地址到 x11，避免覆盖 x0 里的中间值
+        evalAddressInto(e.expr(), "x11");
+        long sz = e.type().size();
+
+        if (sz == 1) {
+            // 读 1 字节并做有符号扩展成 64 位
+            assembly.add(new Directive("\tldrb\tw0, [x11]"));
             assembly.add(new Directive("\tsxtb\tx0, w0"));
-        } else if (expr.type().size() == 4) {
-            assembly.add(new Directive("\tldr\tw0, [x0]"));
+        } else if (sz == 2) {
+            assembly.add(new Directive("\tldrh\tw0, [x11]"));
+            assembly.add(new Directive("\tsxth\tx0, w0"));
+        } else if (sz == 4) {
+            assembly.add(new Directive("\tldr\tw0, [x11]"));
             assembly.add(new Directive("\tsxtw\tx0, w0"));
+        } else if (sz == 8) {
+            assembly.add(new Directive("\tldr\tx0, [x11]"));
         } else {
-            assembly.add(new Directive("\tldr\tx0, [x0]"));
+            errorHandler.error("unsupported load size: " + sz);
         }
         return null;
     }
 
     @Override
-    public Void visit(Var expr) {
-        Entity ent = expr.entity();
-
-        if (localVarOffsets.containsKey(ent)) {
-            long off = localVarOffsets.get(ent);
-            if (expr.type().size() == 8) {
-                assembly.add(new Directive("\tldr\tx0, [x29, #" + off + "]"));
-            } else {
-                assembly.add(new Directive("\tldr\tw0, [x29, #" + off + "]"));
-                assembly.add(new Directive("\tsxtw\tx0, w0"));
-            }
-        } else if (paramOffsets.containsKey(ent)) {
-            long off = paramOffsets.get(ent);
-            if (expr.type().size() == 8) {
-                assembly.add(new Directive("\tldr\tx0, [x29, #" + off + "]"));
-            } else {
-                assembly.add(new Directive("\tldr\tw0, [x29, #" + off + "]"));
-                assembly.add(new Directive("\tsxtw\tx0, w0"));
-            }
-        } else {
-            assembly.add(new Directive("\tadrp\tx0, " + ent.name() + "@PAGE"));
-            assembly.add(new Directive("\tadd\tx0, x0, " + ent.name() + "@PAGEOFF"));
-            assembly.add(new Directive("\tldr\tx0, [x0]"));
-        }
+    public Void visit(Var e) {
+        loadFromVar(e);
         return null;
     }
 
     @Override
-    public Void visit(Int expr) {
-        long v = expr.value();
-
-        if (expr.type().size() == 4) {
+    public Void visit(Int e) {
+        long v = e.value();
+        if (e.type().size() == 4) {
             assembly.add(new Directive("\tmov\tw0, #" + (v & 0xFFFFFFFFL)));
             assembly.add(new Directive("\tsxtw\tx0, w0"));
         } else {
-            if (v < 0) {
-                long uv = ~(-v) & 0xFFFFFFFFFFFFFFFFL;
-                assembly.add(new Directive("\tmovn\tx0, #" + (uv & 0xFFFF)));
-                for (int s = 16; s < 64; s += 16) {
-                    if (((uv >> s) & 0xFFFF) != 0) {
-                        assembly.add(new Directive("\tmovk\tx0, #" + ((uv >> s) & 0xFFFF) + ", lsl #" + s));
-                    }
-                }
-            } else {
-                assembly.add(new Directive("\tmov\tx0, #" + (v & 0xFFFF)));
-                for (int s = 16; s < 64; s += 16) {
-                    if (((v >> s) & 0xFFFF) != 0) {
-                        assembly.add(new Directive("\tmovk\tx0, #" + ((v >> s) & 0xFFFF) + ", lsl #" + s));
-                    }
-                }
-            }
+            materializeImmediate64("x0", v, false);
         }
         return null;
     }
 
     @Override
-    public Void visit(Str expr) {
-        assembly.add(new Directive("\tadrp\tx0, " + expr.entry().symbol() + "@PAGE"));
-        assembly.add(new Directive("\tadd\tx0, x0, " + expr.entry().symbol() + "@PAGEOFF"));
+    public Void visit(Str e) {
+        assembly.add(new Directive("\tadrp\tx0, " + e.entry().symbol() + "@PAGE"));
+        assembly.add(new Directive("\tadd\tx0, x0, " + e.entry().symbol() + "@PAGEOFF"));
         return null;
     }
+
+    /* ====== Helpers ====== */
 
     public AssemblyCode assembly() {
         return assembly;
     }
 
-    private MemoryReference mem(Symbol sym) {
-        return new DirectMemoryReference(sym);
+    private MemoryReference mem(Symbol s) {
+        return new DirectMemoryReference(s);
     }
 
-    private ImmediateValue imm(Symbol sym) {
-        return new ImmediateValue(sym);
+    private ImmediateValue imm(Symbol s) {
+        return new ImmediateValue(s);
     }
 
-    private String escapeString(String str) {
-        return str.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+    private void addrOfEntity(Entity ent) {
+        if (localVarOffsets.containsKey(ent)) {
+            long off = localVarOffsets.get(ent);
+            if (off >= 0) {
+                assembly.add(new Directive("\tadd\tx0, x29, #" + off));
+            } else {
+                assembly.add(new Directive("\tsub\tx0, x29, #" + (-off)));
+            }
+        } else if (paramOffsets.containsKey(ent)) {
+            long off = paramOffsets.get(ent);
+            assembly.add(new Directive("\tadd\tx0, x29, #" + off));
+        } else {
+            assembly.add(new Directive("\tadrp\tx0, " + ent.name() + "@PAGE"));
+            assembly.add(new Directive("\tadd\tx0, x0, " + ent.name() + "@PAGEOFF"));
+        }
     }
 
-    private void generateEpilogue(DefinedFunction func) {
-        assembly.add(new Directive("\tldp\tx29, x30, [sp, #" + (stackSize - 16) + "]"));
-        assembly.add(new Directive("\tadd\tsp, sp, #" + stackSize));
-        assembly.add(new Directive("\tret"));
+    private static final Register ADDR = Register.X11;
+    private static final Register OFFT = Register.X12;
+
+    private void evalAddress(Expr e) {
+        evalAddressInto(e, ADDR.toString());
     }
+
+    private void evalAddressInto(Expr e, String dst) {
+        if (e instanceof Addr) {
+            addrOfEntityInto(((Addr) e).entity(), dst);
+            return;
+        }
+        if (e instanceof Var) {
+            addrOfEntityInto(((Var) e).entity(), dst);
+            return;
+        }
+        if (e instanceof Mem) {
+            evalAddressInto(((Mem) e).expr(), dst);
+            return;
+        }
+        if (e instanceof Int) {
+            materializeImmediate64(dst, ((Int) e).value(), false);
+            return;
+        }
+        if (e instanceof Bin) {
+            Bin b = (Bin) e;
+            Op op = b.op();
+            if (op == Op.ADD || op == Op.SUB) {
+                evalAddressInto(b.left(), dst); // base -> dst
+                b.right().accept(this); // x0 = offset(bytes)
+                assembly.add(new Directive("\tmov\t" + OFFT + ", x0"));
+                if (op == Op.ADD)
+                    assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + OFFT));
+                else
+                    assembly.add(new Directive("\tsub\t" + dst + ", " + dst + ", " + OFFT));
+                return;
+            }
+        }
+        // fallback
+        e.accept(this); // x0 assumed = address
+        if (!"x0".equals(dst))
+            assembly.add(new Directive("\tmov\t" + dst + ", x0"));
+    }
+
+    /**
+     * addrOfEntity 写到指定寄存器
+     */
+    private void addrOfEntityInto(Entity ent, String dst) {
+        if (localVarOffsets.containsKey(ent)) {
+            long off = localVarOffsets.get(ent);
+            if (off >= 0) {
+                assembly.add(new Directive("\tadd\t" + dst + ", x29, #" + off));
+            } else {
+                assembly.add(new Directive("\tsub\t" + dst + ", x29, #" + (-off)));
+            }
+        } else if (paramOffsets.containsKey(ent)) {
+            long off = paramOffsets.get(ent);
+            assembly.add(new Directive("\tadd\t" + dst + ", x29, #" + off));
+        } else {
+            assembly.add(new Directive("\tadrp\t" + dst + ", " + ent.name() + "@PAGE"));
+            assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + ent.name() + "@PAGEOFF"));
+        }
+    }
+
+    private void loadFromVar(Var v) {
+        Entity ent = v.entity();
+        long sz = v.type().size();
+        if (localVarOffsets.containsKey(ent)) {
+            long off = localVarOffsets.get(ent);
+            if (sz == 8) {
+                if (off >= 0) {
+                    assembly.add(new Directive("\tldr\tx0, [x29, #" + off + "]"));
+                } else {
+                    assembly.add(new Directive("\tldr\tx0, [x29, #-" + (-off) + "]"));
+                }
+            } else {
+                if (off >= 0) {
+                    assembly.add(new Directive("\tldr\tw0, [x29, #" + off + "]"));
+                } else {
+                    assembly.add(new Directive("\tldr\tw0, [x29, #-" + (-off) + "]"));
+                }
+                assembly.add(new Directive("\tsxtw\tx0, w0"));
+            }
+        } else if (paramOffsets.containsKey(ent)) {
+            long off = paramOffsets.get(ent);
+            if (sz == 8) {
+                assembly.add(new Directive("\tldr\tx0, [x29, #" + off + "]"));
+            } else {
+                assembly.add(new Directive("\tldr\tw0, [x29, #" + off + "]"));
+                assembly.add(new Directive("\tsxtw\tx0, w0"));
+            }
+        } else {
+            assembly.add(new Directive("\tadrp\tx0, " + ent.name() + "@PAGE"));
+            assembly.add(new Directive("\tadd\tx0, x0, " + ent.name() + "@PAGEOFF"));
+            if (sz == 8) {
+                assembly.add(new Directive("\tldr\tx0, [x0]"));
+            } else {
+                assembly.add(new Directive("\tldr\tw0, [x0]"));
+                assembly.add(new Directive("\tsxtw\tx0, w0"));
+            }
+        }
+    }
+
+    private void storeToVar(Var v, Register src) {
+        Entity ent = v.entity();
+        long sz = v.type().size();
+        if (localVarOffsets.containsKey(ent)) {
+            long off = localVarOffsets.get(ent);
+            if (sz == 8) {
+                if (off >= 0) {
+                    assembly.add(new Directive("\tstr\t" + src + ", [x29, #" + off + "]"));
+                } else {
+                    assembly.add(new Directive("\tstr\t" + src + ", [x29, #-" + (-off) + "]"));
+                }
+            } else {
+                String w = "w" + src.name().substring(1);
+                if (off >= 0) {
+                    assembly.add(new Directive("\tstr\t" + w + ", [x29, #" + off + "]"));
+                } else {
+                    assembly.add(new Directive("\tstr\t" + w + ", [x29, #-" + (-off) + "]"));
+                }
+            }
+        } else if (paramOffsets.containsKey(ent)) {
+            long off = paramOffsets.get(ent);
+            assembly.add(new Directive("\tstr\t" + src + ", [x29, #" + off + "]"));
+        } else {
+            assembly.add(new Directive("\tadrp\tx0, " + ent.name() + "@PAGE"));
+            assembly.add(new Directive("\tadd\tx0, x0, " + ent.name() + "@PAGEOFF"));
+            assembly.add(new Directive("\tstr\t" + src + ", [x0]"));
+        }
+    }
+
+    /**
+     * mov/movk/movn build 64-bit imm; signExtend32 为 true 时按 32 位有符号扩展
+     */
+    private void materializeImmediate64(String reg, long v, boolean signExtend32) {
+        if (signExtend32) {
+            long w = v & 0xFFFFFFFFL;
+            assembly.add(new Directive("\tmov\tw0, #" + w));
+            assembly.add(new Directive("\tsxtw\tx0, w0"));
+            if (!"x0".equals(reg)) {
+                assembly.add(new Directive("\tmov\t" + reg + ", x0"));
+            }
+            return;
+        }
+        if (v < 0) {
+            long uv = ~(-v) & 0xFFFFFFFFFFFFFFFFL;
+            assembly.add(new Directive("\tmovn\t" + reg + ", #" + (uv & 0xFFFF)));
+            for (int s = 16; s < 64; s += 16) {
+                long chunk = (uv >>> s) & 0xFFFF;
+                if (chunk != 0)
+                    assembly.add(new Directive("\tmovk\t" + reg + ", #" + chunk + ", lsl #" + s));
+            }
+        } else {
+            assembly.add(new Directive("\tmov\t" + reg + ", #" + (v & 0xFFFF)));
+            for (int s = 16; s < 64; s += 16) {
+                long chunk = (v >>> s) & 0xFFFF;
+                if (chunk != 0)
+                    assembly.add(new Directive("\tmovk\t" + reg + ", #" + chunk + ", lsl #" + s));
+            }
+        }
+    }
+
+    /**
+     * 只声明，不在这里给实现，防止你又被我改错
+     */
+    private String escapeString(String s) {
+        // use your own correct version
+        return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
+    }
+
+    private void storeSized(String addrReg, String srcReg, long size, boolean isUnsigned) {
+        if (size == 1) {
+            String wsrc = srcReg.replace('x', 'w');
+            assembly.add(new Directive("\tstrb\t" + wsrc + ", [" + addrReg + "]"));
+        } else if (size == 4) {
+            String wsrc = srcReg.replace('x', 'w');
+            assembly.add(new Directive("\tstr\t" + wsrc + ", [" + addrReg + "]"));
+        } else {
+            assembly.add(new Directive("\tstr\t" + srcReg + ", [" + addrReg + "]"));
+        }
+    }
+
+    private void loadSized(String addrReg, String dstReg, long size, boolean signExtend) {
+        if (size == 1) {
+            assembly.add(new Directive("\tldrb\tw0, [" + addrReg + "]"));
+            if (signExtend)
+                assembly.add(new Directive("\tsxtb\t" + dstReg + ", w0"));
+            else
+                assembly.add(new Directive("\tuxtb\t" + dstReg + ", w0"));
+        } else if (size == 4) {
+            assembly.add(new Directive("\tldr\tw0, [" + addrReg + "]"));
+            if (signExtend)
+                assembly.add(new Directive("\tsxtw\t" + dstReg + ", w0"));
+            else
+                assembly.add(new Directive("\tuxtw\t" + dstReg + ", w0"));
+        } else {
+            assembly.add(new Directive("\tldr\t" + dstReg + ", [" + addrReg + "]"));
+        }
+    }
+
 }
