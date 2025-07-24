@@ -206,19 +206,23 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         // 局部变量从负偏移开始，从-8开始
         long localSize = 0;
         for (DefinedVariable v : f.lvarScope().allVariablesWithPrivate()) {
-            if (v.isParameter())
+            if (v.isParameter()) {
                 continue;
-            if (v.isPrivate())
+            }
+            if (v.isPrivate()) {
                 continue; // static local -> data
+            }
             long sz = (v.type().allocSize() + 7) & ~7;
-            localVarOffsets.put(v, -8 - localSize); // 负数偏移
+            long offset = -8 - localSize; // 负数偏移
+            localVarOffsets.put(v, offset);
             localSize += sz;
         }
 
         // 参数从正偏移开始，从+16开始（跳过保存的FP和返回地址）
         List<Parameter> ps = f.parameters();
         for (int i = 0; i < ps.size(); i++) {
-            paramOffsets.put(ps.get(i), 16 + i * 8L); // 正数偏移
+            long offset = 16 + i * 8L; // 正数偏移
+            paramOffsets.put(ps.get(i), offset);
         }
 
         // frameSize只需要局部变量的大小，参数在调用者栈帧中
@@ -318,15 +322,24 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
     @Override
     public Void visit(Assign s) {
-        // 1) 先算 RHS，值在 x0
-        s.rhs().accept(this);
-        assembly.add(new Directive("\tmov\t" + VAL_TMP + ", x0")); // 保存值
-
         // 2) 根据 LHS 类型生成地址并按大小写入
         if (s.lhs() instanceof Var) {
+            // 检查RHS是否是地址计算表达式
+            if (isAddressExpression(s.rhs())) {
+                // 使用evalAddressInto计算地址
+                evalAddressInto(s.rhs(), VAL_TMP.toString());
+            } else {
+                // 直接计算值
+                s.rhs().accept(this);
+                assembly.add(new Directive("\tmov\t" + VAL_TMP + ", x0"));
+            }
             storeToVar((Var) s.lhs(), VAL_TMP);
             return null;
         }
+
+        // 1) 先算 RHS，值在 x0
+        s.rhs().accept(this);
+        assembly.add(new Directive("\tmov\t" + VAL_TMP + ", x0")); // 保存值
 
         long sz = s.lhs().type().size(); // 1/2/4/8
         // 生成地址到 x11
@@ -435,70 +448,72 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
     @Override
     public Void visit(Bin e) {
-        e.left().accept(this);
-        assembly.add(new Directive("\tmov\tx1, x0"));
+        // 参考x86的实现，使用栈来避免寄存器冲突
         e.right().accept(this);
-        assembly.add(new Directive("\tmov\tx2, x0"));
+        assembly.add(new Directive("\tstr\tx0, [sp, #-16]!")); // 将右操作数压栈
+        e.left().accept(this);
+        assembly.add(new Directive("\tldr\t" + TMP0 + ", [sp], #16")); // 将右操作数出栈到TMP0
 
         switch (e.op()) {
             case ADD:
-                assembly.add(new Directive("\tadd\tx0, x1, x2"));
+                assembly.add(new Directive("\tadd\tx0, x0, " + TMP0));
                 break;
             case SUB:
-                assembly.add(new Directive("\tsub\tx0, x1, x2"));
+                assembly.add(new Directive("\tsub\tx0, x0, " + TMP0));
                 break;
             case MUL:
-                assembly.add(new Directive("\tmul\tx0, x1, x2"));
+                assembly.add(new Directive("\tmul\tx0, x0, " + TMP0));
                 break;
             case S_DIV:
-                assembly.add(new Directive("\tsdiv\tx0, x1, x2"));
+                assembly.add(new Directive("\tsdiv\tx0, x0, " + TMP0));
                 break;
             case S_MOD:
-                assembly.add(new Directive("\tsdiv\t" + TMP0 + ", x1, x2"));
-                assembly.add(new Directive("\tmul\t" + TMP0 + ", " + TMP0 + ", x2"));
-                assembly.add(new Directive("\tsub\tx0, x1, " + TMP0));
+                assembly.add(new Directive("\tsdiv\t" + ADR_TMP0 + ", x0, " + TMP0));
+                assembly.add(new Directive("\tmul\t" + ADR_TMP0 + ", " + ADR_TMP0 + ", " + TMP0));
+                assembly.add(new Directive("\tsub\tx0, x0, " + ADR_TMP0));
                 break;
             case BIT_AND:
-                assembly.add(new Directive("\tand\tx0, x1, x2"));
+                assembly.add(new Directive("\tand\tx0, x0, " + TMP0));
                 break;
             case BIT_OR:
-                assembly.add(new Directive("\torr\tx0, x1, x2"));
+                assembly.add(new Directive("\torr\tx0, x0, " + TMP0));
                 break;
             case BIT_XOR:
-                assembly.add(new Directive("\teor\tx0, x1, x2"));
+                assembly.add(new Directive("\teor\tx0, x0, " + TMP0));
                 break;
             case BIT_LSHIFT:
-                assembly.add(new Directive("\tlsl\tx0, x1, x2"));
+                assembly.add(new Directive("\tlsl\tx0, x0, " + TMP0));
                 break;
             case ARITH_RSHIFT:
-                assembly.add(new Directive("\tasr\tx0, x1, x2"));
+                assembly.add(new Directive("\tasr\tx0, x0, " + TMP0));
                 break;
             case EQ:
-                assembly.add(new Directive("\tcmp\tx1, x2"));
+                assembly.add(new Directive("\tcmp\tx0, " + TMP0));
                 assembly.add(new Directive("\tcset\tx0, eq"));
                 break;
             case NEQ:
-                assembly.add(new Directive("\tcmp\tx1, x2"));
+                assembly.add(new Directive("\tcmp\tx0, " + TMP0));
                 assembly.add(new Directive("\tcset\tx0, ne"));
                 break;
             case S_LT:
-                assembly.add(new Directive("\tcmp\tx1, x2"));
+                assembly.add(new Directive("\tcmp\tx0, " + TMP0));
                 assembly.add(new Directive("\tcset\tx0, lt"));
                 break;
             case S_LTEQ:
-                assembly.add(new Directive("\tcmp\tx1, x2"));
+                assembly.add(new Directive("\tcmp\tx0, " + TMP0));
                 assembly.add(new Directive("\tcset\tx0, le"));
                 break;
             case S_GT:
-                assembly.add(new Directive("\tcmp\tx1, x2"));
+                assembly.add(new Directive("\tcmp\tx0, " + TMP0));
                 assembly.add(new Directive("\tcset\tx0, gt"));
                 break;
             case S_GTEQ:
-                assembly.add(new Directive("\tcmp\tx1, x2"));
+                assembly.add(new Directive("\tcmp\tx0, " + TMP0));
                 assembly.add(new Directive("\tcset\tx0, ge"));
                 break;
             default:
-                assembly.add(new Directive("\tmov\tx0, x1"));
+                // 保持x0不变
+                break;
         }
         return null;
     }
@@ -602,7 +617,11 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             return;
         }
         if (e instanceof Var) {
-            addrOfEntityInto(((Var) e).entity(), dst);
+            // 对于Var，我们需要读取变量的值，而不是计算变量的地址
+            // 因为Var可能存储的是一个地址（比如@tmp0存储&a[0]）
+            loadFromVar((Var) e);
+            if (!"x0".equals(dst))
+                assembly.add(new Directive("\tmov\t" + dst + ", x0"));
             return;
         }
         if (e instanceof Mem) {
@@ -618,14 +637,53 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             Op op = b.op();
             if (op == Op.ADD || op == Op.SUB) {
                 evalAddressInto(b.left(), dst); // base -> dst
-                b.right().accept(this); // x0 = offset(bytes)
-                assembly.add(new Directive("\tmov\t" + OFFT + ", x0"));
+                // 使用临时寄存器计算右边的表达式，避免覆盖dst
+                evalAddressInto(b.right(), OFFT.toString()); // 直接计算到OFFT寄存器
                 if (op == Op.ADD)
                     assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + OFFT));
                 else
                     assembly.add(new Directive("\tsub\t" + dst + ", " + dst + ", " + OFFT));
                 return;
             }
+            // 对于其他操作，使用通用处理但避免寄存器冲突
+            b.left().accept(this);
+            assembly.add(new Directive("\tmov\t" + dst + ", x0"));
+            b.right().accept(this);
+            assembly.add(new Directive("\tmov\t" + OFFT + ", x0"));
+
+            switch (op) {
+                case MUL:
+                    assembly.add(new Directive("\tmul\t" + dst + ", " + dst + ", " + OFFT));
+                    break;
+                case S_DIV:
+                    assembly.add(new Directive("\tsdiv\t" + dst + ", " + dst + ", " + OFFT));
+                    break;
+                case S_MOD:
+                    assembly.add(new Directive("\tsdiv\t" + TMP0 + ", " + dst + ", " + OFFT));
+                    assembly.add(new Directive("\tmul\t" + TMP0 + ", " + TMP0 + ", " + OFFT));
+                    assembly.add(new Directive("\tsub\t" + dst + ", " + dst + ", " + TMP0));
+                    break;
+                case BIT_AND:
+                    assembly.add(new Directive("\tand\t" + dst + ", " + dst + ", " + OFFT));
+                    break;
+                case BIT_OR:
+                    assembly.add(new Directive("\torr\t" + dst + ", " + dst + ", " + OFFT));
+                    break;
+                case BIT_XOR:
+                    assembly.add(new Directive("\teor\t" + dst + ", " + dst + ", " + OFFT));
+                    break;
+                case BIT_LSHIFT:
+                    assembly.add(new Directive("\tlsl\t" + dst + ", " + dst + ", " + OFFT));
+                    break;
+                case ARITH_RSHIFT:
+                    assembly.add(new Directive("\tasr\t" + dst + ", " + dst + ", " + OFFT));
+                    break;
+                default:
+                    // 对于比较操作，我们不应该在这里处理地址计算
+                    errorHandler.error("unsupported binary operation in address calculation: " + op);
+                    break;
+            }
+            return;
         }
         // fallback
         e.accept(this); // x0 assumed = address
@@ -724,6 +782,20 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     /**
      * mov/movk/movn build 64-bit imm; signExtend32 为 true 时按 32 位有符号扩展
      */
+    /**
+     * 判断一个表达式是否是地址计算表达式
+     */
+    private boolean isAddressExpression(Expr e) {
+        if (e instanceof Addr) {
+            return true;
+        }
+        if (e instanceof Bin) {
+            Bin b = (Bin) e;
+            return b.op() == Op.ADD || b.op() == Op.SUB;
+        }
+        return false;
+    }
+
     private void materializeImmediate64(String reg, long v, boolean signExtend32) {
         if (signExtend32) {
             long w = v & 0xFFFFFFFFL;
