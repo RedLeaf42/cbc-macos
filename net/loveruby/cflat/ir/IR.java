@@ -1,4 +1,5 @@
 package net.loveruby.cflat.ir;
+
 import net.loveruby.cflat.entity.*;
 import net.loveruby.cflat.ast.Location;
 import net.loveruby.cflat.asm.Type;
@@ -12,8 +13,8 @@ public class IR {
     List<UndefinedFunction> funcdecls;
     ToplevelScope scope;
     ConstantTable constantTable;
-    List<DefinedVariable> gvars;   // cache
-    List<DefinedVariable> comms;   // cache
+    List<DefinedVariable> gvars; // cache
+    List<DefinedVariable> comms; // cache
 
     public IR(Location source,
             List<DefinedVariable> defvars,
@@ -67,12 +68,14 @@ public class IR {
     }
 
     public boolean isGlobalVariableDefined() {
-        return ! definedGlobalVariables().isEmpty();
+        return !definedGlobalVariables().isEmpty();
     }
 
-    /** Returns the list of global variables.
-     *  A global variable is a variable which has
-     *  global scope and is initialized.  */
+    /**
+     * Returns the list of global variables.
+     * A global variable is a variable which has
+     * global scope and is initialized.
+     */
     public List<DefinedVariable> definedGlobalVariables() {
         if (gvars == null) {
             initVariables();
@@ -81,12 +84,14 @@ public class IR {
     }
 
     public boolean isCommonSymbolDefined() {
-        return ! definedCommonSymbols().isEmpty();
+        return !definedCommonSymbols().isEmpty();
     }
 
-    /** Returns the list of common symbols.
-     *  A common symbol is a variable which has
-     *  global scope and is not initialized.  */
+    /**
+     * Returns the list of common symbols.
+     * A common symbol is a variable which has
+     * global scope and is not initialized.
+     */
     public List<DefinedVariable> definedCommonSymbols() {
         if (comms == null) {
             initVariables();
@@ -103,7 +108,7 @@ public class IR {
     }
 
     public boolean isStringLiteralDefined() {
-        return ! constantTable.isEmpty();
+        return !constantTable.isEmpty();
     }
 
     public ConstantTable constantTable() {

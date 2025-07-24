@@ -1,4 +1,5 @@
 package net.loveruby.cflat.entity;
+
 import net.loveruby.cflat.type.Type;
 import net.loveruby.cflat.utils.ErrorHandler;
 import net.loveruby.cflat.exception.*;
@@ -6,7 +7,7 @@ import java.util.*;
 
 public class ToplevelScope extends Scope {
     protected Map<String, Entity> entities;
-    protected List<DefinedVariable> staticLocalVariables;   // cache
+    protected List<DefinedVariable> staticLocalVariables; // cache
 
     public ToplevelScope() {
         super();
@@ -63,18 +64,19 @@ public class ToplevelScope extends Scope {
     }
     // #@@}
 
-    /** Returns a list of all global variables.
+    /**
+     * Returns a list of all global variables.
      * "All global variable" means:
      *
-     *    * has global scope
-     *    * defined or undefined
-     *    * public or private
+     * * has global scope
+     * * defined or undefined
+     * * public or private
      */
     public List<Variable> allGlobalVariables() {
         List<Variable> result = new ArrayList<Variable>();
         for (Entity ent : entities.values()) {
             if (ent instanceof Variable) {
-                result.add((Variable)ent);
+                result.add((Variable) ent);
             }
         }
         result.addAll(staticLocalVariables());
@@ -85,7 +87,7 @@ public class ToplevelScope extends Scope {
         List<DefinedVariable> result = new ArrayList<DefinedVariable>();
         for (Entity ent : entities.values()) {
             if (ent instanceof DefinedVariable) {
-                result.add((DefinedVariable)ent);
+                result.add((DefinedVariable) ent);
             }
         }
         result.addAll(staticLocalVariables());
@@ -104,8 +106,7 @@ public class ToplevelScope extends Scope {
                 if (seq == null) {
                     var.setSequence(0);
                     seqTable.put(var.name(), 1);
-                }
-                else {
+                } else {
                     var.setSequence(seq);
                     seqTable.put(var.name(), seq + 1);
                 }

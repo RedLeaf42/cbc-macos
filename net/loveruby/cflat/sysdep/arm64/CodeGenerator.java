@@ -137,8 +137,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     }
 
     private void emitCommonSymbol(DefinedVariable var) {
-        // Debug: emit a comment with the variable name
-        assembly.add(new Directive("\t// emitCommonSymbol: " + var.name()));
         long size = var.type().size();
         int align = Math.max(3, log2ceil(size)); // >= 8 byte
 
@@ -228,6 +226,21 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         // frameSize只需要局部变量的大小，参数在调用者栈帧中
         frameSize = localSize;
         frameSize = (frameSize + 15) & ~15;
+
+        // 重新计算偏移，从帧的底部开始分配
+        long currentOffset = 0;
+        for (DefinedVariable v : f.lvarScope().allVariablesWithPrivate()) {
+            if (v.isParameter()) {
+                continue;
+            }
+            if (v.isPrivate()) {
+                continue; // static local -> data
+            }
+            long sz = v.type().allocSize();
+            long offset = -(frameSize - currentOffset); // 从帧的底部开始分配
+            localVarOffsets.put(v, offset);
+            currentOffset += sz;
+        }
     }
 
     private void genPrologue() {
