@@ -67,13 +67,20 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
     private void collectStaticLocals(IR ir) {
         staticLocals.clear();
-        for (DefinedFunction f : ir.definedFunctions()) {
-            for (DefinedVariable v : f.lvarScope().allVariablesWithPrivate()) {
-                if (!v.isParameter() && v.isPrivate()) {
-                    staticLocals.add(v);
-                }
+        // 考虑全局变量中定义的静态变量
+        for (DefinedVariable global : ir.definedCommonSymbols()) {
+            if (global.isPrivate()) {
+                staticLocals.add(global);
             }
         }
+//        for (DefinedFunction f : ir.definedFunctions()) {
+//            for (DefinedVariable v : f.lvarScope().allVariablesWithPrivate()) {
+//                System.out.println("collectStaticLocals current = "+v.name());
+//                if (!v.isParameter() && v.isPrivate()) {
+//                    staticLocals.add(v);
+//                }
+//            }
+//        }
     }
 
     /* ====== Data ====== */
@@ -89,17 +96,24 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             assembly.add(new Directive("\t.asciz\t\"" + escapeString(ent.value()) + "\""));
         }
 
-        // 2. initialized globals (both public and private)
+        // 2. initialized globals (both public and private) 初始化的静态/非静态全局变量
         for (DefinedVariable var : ir.definedGlobalVariables()) {
+            System.out.println("Debug global var = "+var.name());
             emitInitializedGlobal(var, !var.isPrivate(), ir);
         }
-        // 3. static locals (private in IR)
+        // 3. static locals (private in IR) 没有初始化的静态全局变量
         for (DefinedVariable var : staticLocals) {
+            System.out.println("Debug static var = "+var.name());
             emitInitializedGlobal(var, false, ir);
         }
-        // 4. common (tentative) symbols
+        // 4. common (tentative) symbols 没有初始化的全局变量,理论上来说不应该包含静态变量的
         for (DefinedVariable var : ir.definedCommonSymbols()) {
-            emitCommonSymbol(var);
+            // private变量不发射到这个区域
+            if (!var.isPrivate()) {
+                emitCommonSymbol(var);
+            } else {
+                System.err.println("exclude static variable "+var.name());
+            }
         }
     }
 
@@ -112,6 +126,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         if (external) {
             assembly.add(new Directive("\t.globl\t_" + var.name()));
         } else {
+            System.out.println("Debug private_extern\t "+var.name());
             assembly.add(new Directive("\t.private_extern\t_" + var.name()));
         }
         assembly.add(new Label(sym));
