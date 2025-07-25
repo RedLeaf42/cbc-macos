@@ -332,18 +332,19 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             }
         }
 
-        // 递归分配局部变量空间，允许不同block重叠
-        LocalScope root = f.lvarScope();
-        long totalLocalSize = allocateLocalVariablesRecursive(root, 0);
-
         // 计算参数保存空间
         long paramSaveSize = 0;
         for (int i = 0; i < ps.size() && i < 8; i++) {
             paramSaveSize += 8; // 每个参数占8字节
         }
 
+        // 递归分配局部变量空间，允许不同block重叠
+        // 从参数保存空间之后开始分配
+        LocalScope root = f.lvarScope();
+        long totalLocalSize = allocateLocalVariablesRecursive(root, paramSaveSize);
+
         // 总栈帧大小 = 局部变量大小 + 参数保存空间
-        frameSize = totalLocalSize + paramSaveSize;
+        frameSize = totalLocalSize;
     }
 
     // 递归分配局部变量空间，返回当前及所有子作用域最大所需空间
