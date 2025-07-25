@@ -61,8 +61,12 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     @Override
     public AssemblyCode generate(IR ir) {
         currentIR = ir; // 保存当前IR的引用
-        locateSymbols(ir);
         collectStaticLocals(ir);
+        locateSymbols(ir);
+        // 为静态变量设置符号引用
+        for (DefinedVariable var : staticLocals) {
+            locateGlobalVariable(var);
+        }
         generateDataSection(ir);
         generateTextSection(ir);
         return assembly;
@@ -81,6 +85,11 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
         // 为所有common symbols设置符号引用
         for (DefinedVariable var : ir.definedCommonSymbols()) {
+            locateGlobalVariable(var);
+        }
+
+        // 为所有静态局部变量设置符号引用
+        for (DefinedVariable var : staticLocals) {
             locateGlobalVariable(var);
         }
     }
@@ -762,16 +771,59 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             long off = paramOffsets.get(ent);
             assembly.add(new Directive("\tadd\tx0, x29, #" + off));
         } else {
-            // 对于外部符号，根据类型选择重定位方式
-            String symbolName = ent.isPrivate() ? ent.name() : "_" + ent.name();
-            if (ent.type().isFunction()) {
-                // 对于外部函数，使用@GOT重定位
-                assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@GOTPAGE"));
-                assembly.add(new Directive("\tldr\tx0, [x0, " + symbolName + "@GOTPAGEOFF]"));
+            // 使用预设的符号引用
+            if (ent.address() != null) {
+                // 如果有预设的地址，直接使用
+                if (ent.address() instanceof ImmediateValue) {
+                    ImmediateValue imm = (ImmediateValue) ent.address();
+                    if (imm.expr() instanceof Symbol) {
+                        Symbol sym = (Symbol) imm.expr();
+                        assembly.add(new Directive("\tadrp\tx0, " + sym.toSource() + "@PAGE"));
+                        assembly.add(new Directive("\tadd\tx0, x0, " + sym.toSource() + "@PAGEOFF"));
+                    } else {
+                        // 兜底方案
+                        String symbolName = "_" + ent.name();
+                        assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
+                        assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+                    }
+                } else {
+                    // 兜底方案
+                    String symbolName = "_" + ent.name();
+                    assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
+                    assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+                }
+            } else if (ent.memref() != null) {
+                // 如果有预设的内存引用，使用它
+                if (ent.memref() instanceof DirectMemoryReference) {
+                    DirectMemoryReference mem = (DirectMemoryReference) ent.memref();
+                    if (mem.value() instanceof Symbol) {
+                        Symbol sym = (Symbol) mem.value();
+                        assembly.add(new Directive("\tadrp\tx0, " + sym.toSource() + "@PAGE"));
+                        assembly.add(new Directive("\tadd\tx0, x0, " + sym.toSource() + "@PAGEOFF"));
+                    } else {
+                        // 兜底方案
+                        String symbolName = "_" + ent.name();
+                        assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
+                        assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+                    }
+                } else {
+                    // 兜底方案
+                    String symbolName = "_" + ent.name();
+                    assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
+                    assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+                }
             } else {
-                // 对于外部变量，使用@PAGE/@PAGEOFF重定位
-                assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
-                assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+                // 兜底方案：动态生成重定位
+                String symbolName = "_" + ent.name();
+                if (ent.type().isFunction()) {
+                    // 对于外部函数，使用@GOT重定位
+                    assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@GOTPAGE"));
+                    assembly.add(new Directive("\tldr\tx0, [x0, " + symbolName + "@GOTPAGEOFF]"));
+                } else {
+                    // 对于外部变量，使用@PAGE/@PAGEOFF重定位
+                    assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
+                    assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+                }
             }
         }
     }
@@ -902,7 +954,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             // 使用预设的符号引用
             if (ent.address() != null) {
                 // 如果有预设的地址，直接使用
-                System.err.println("Debug addrOfEntityInto has address " + ent.name());
                 if (ent.address() instanceof ImmediateValue) {
                     ImmediateValue imm = (ImmediateValue) ent.address();
                     if (imm.expr() instanceof Symbol) {
@@ -922,7 +973,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                     assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + symbolName + "@PAGEOFF"));
                 }
             } else if (ent.memref() != null) {
-                System.err.println("Debug addrOfEntityInto has memref " + ent.name());
                 // 如果有预设的内存引用，使用它
                 if (ent.memref() instanceof DirectMemoryReference) {
                     DirectMemoryReference mem = (DirectMemoryReference) ent.memref();
@@ -943,7 +993,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                     assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + symbolName + "@PAGEOFF"));
                 }
             } else {
-                System.err.println("Debug addrOfEntityInto fallback maybe global variable " + ent.name());
                 // 兜底方案：动态生成重定位
                 String symbolName = "_" + ent.name();
                 assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@GOTPAGE"));
