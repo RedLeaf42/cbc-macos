@@ -375,7 +375,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         }
 
         if (e.isStaticCall()) {
-            assembly.add(new Directive("\tbl\t_" + e.function().name()));
+            assembly.add(new Directive("\tbl\t" + e.function().callingSymbol().toSource()));
         } else {
             // 对于间接函数调用，需要将函数地址加载到不同的寄存器，避免覆盖x0中的参数
             e.expr().accept(this); // callee -> x0
