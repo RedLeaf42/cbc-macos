@@ -462,7 +462,17 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     @Override
     public Void visit(Switch s) {
         s.cond().accept(this);
-        assembly.add(new Directive("\tb\t" + s.defaultLabel().symbol()));
+        // 条件值现在在 x0 中
+        for (Case c : s.cases()) {
+            // 将 case 值加载到临时寄存器
+            materializeImmediate64(TMP0.toString(), c.value, false);
+            // 比较条件值和 case 值
+            assembly.add(new Directive("\tcmp\tx0, " + TMP0));
+            // 如果相等，跳转到对应的标签
+            assembly.add(new Directive("\tbeq\t" + c.label.symbol().toSource(labelSymbols) + "f"));
+        }
+        // 如果没有匹配的 case，跳转到 default 标签
+        assembly.add(new Directive("\tb\t" + s.defaultLabel().symbol().toSource(labelSymbols) + "f"));
         return null;
     }
 
@@ -888,19 +898,42 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             }
         } else if (paramOffsets.containsKey(ent)) {
             long off = paramOffsets.get(ent);
-            if (sz == 8) {
-                assembly.add(new Directive("\tldr\tx0, [x29, #" + off + "]"));
-            } else if (sz == 4) {
-                assembly.add(new Directive("\tldr\tw0, [x29, #" + off + "]"));
-                assembly.add(new Directive("\tsxtw\tx0, w0"));
-            } else if (sz == 2) {
-                assembly.add(new Directive("\tldrh\tw0, [x29, #" + off + "]"));
-                assembly.add(new Directive("\tsxth\tx0, w0"));
-            } else if (sz == 1) {
-                assembly.add(new Directive("\tldrb\tw0, [x29, #" + off + "]"));
-                assembly.add(new Directive("\tsxtb\tx0, w0"));
+            // 在 ARM64 中，前 8 个参数通过寄存器传递
+            // 参数索引从 0 开始，对应 x0, x1, x2, ...
+            int paramIndex = (int) ((off - 16) / 8); // 16 是栈帧基址，每个参数占 8 字节
+            if (paramIndex < 8) {
+                // 参数在寄存器中，直接使用
+                String reg = "x" + paramIndex;
+                if (sz == 8) {
+                    assembly.add(new Directive("\tmov\tx0, " + reg));
+                } else if (sz == 4) {
+                    assembly.add(new Directive("\tmov\tx0, " + reg));
+                    assembly.add(new Directive("\tsxtw\tx0, w0"));
+                } else if (sz == 2) {
+                    assembly.add(new Directive("\tmov\tx0, " + reg));
+                    assembly.add(new Directive("\tsxth\tx0, w0"));
+                } else if (sz == 1) {
+                    assembly.add(new Directive("\tmov\tx0, " + reg));
+                    assembly.add(new Directive("\tsxtb\tx0, w0"));
+                } else {
+                    errorHandler.error("unsupported load size: " + sz);
+                }
             } else {
-                errorHandler.error("unsupported load size: " + sz);
+                // 参数在栈上，从栈加载
+                if (sz == 8) {
+                    assembly.add(new Directive("\tldr\tx0, [x29, #" + off + "]"));
+                } else if (sz == 4) {
+                    assembly.add(new Directive("\tldr\tw0, [x29, #" + off + "]"));
+                    assembly.add(new Directive("\tsxtw\tx0, w0"));
+                } else if (sz == 2) {
+                    assembly.add(new Directive("\tldrh\tw0, [x29, #" + off + "]"));
+                    assembly.add(new Directive("\tsxth\tx0, w0"));
+                } else if (sz == 1) {
+                    assembly.add(new Directive("\tldrb\tw0, [x29, #" + off + "]"));
+                    assembly.add(new Directive("\tsxtb\tx0, w0"));
+                } else {
+                    errorHandler.error("unsupported load size: " + sz);
+                }
             }
         } else {
             // 对于外部符号，根据类型选择重定位方式
