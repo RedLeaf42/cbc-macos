@@ -797,7 +797,10 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     }
 
     /**
-     * addrOfEntity 写到指定寄存器
+     * 计算 Entity 的地址并写入指定寄存器 dst。
+     * - 局部变量 / 形参：沿用原先栈偏移逻辑
+     * - 当前目标文件内定义的全局符号：使用 PAGE/PAGEOFF
+     * - 其它外部符号：必须通过 GOT 先取绝对地址
      */
     private void addrOfEntityInto(Entity ent, String dst) {
         if (localVarOffsets.containsKey(ent)) {
@@ -814,6 +817,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             // 使用预设的符号引用
             if (ent.address() != null) {
                 // 如果有预设的地址，直接使用
+                System.err.println("Debug addrOfEntityInto has address " + ent.name());
                 if (ent.address() instanceof ImmediateValue) {
                     ImmediateValue imm = (ImmediateValue) ent.address();
                     if (imm.expr() instanceof Symbol) {
@@ -833,6 +837,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                     assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + symbolName + "@PAGEOFF"));
                 }
             } else if (ent.memref() != null) {
+                System.err.println("Debug addrOfEntityInto has memref " + ent.name());
                 // 如果有预设的内存引用，使用它
                 if (ent.memref() instanceof DirectMemoryReference) {
                     DirectMemoryReference mem = (DirectMemoryReference) ent.memref();
@@ -853,10 +858,11 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                     assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + symbolName + "@PAGEOFF"));
                 }
             } else {
+                System.err.println("Debug addrOfEntityInto fallback maybe global variable " + ent.name());
                 // 兜底方案：动态生成重定位
                 String symbolName = ent.isPrivate() ? ent.name() : "_" + ent.name();
-                assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@PAGE"));
-                assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + symbolName + "@PAGEOFF"));
+                assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@GOTPAGE"));
+                assembly.add(new Directive("\tldr\t" + dst + ", [" + dst + ", " + symbolName + "@GOTPAGEOFF]"));
             }
         }
     }
@@ -1117,6 +1123,33 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         } else {
             assembly.add(new Directive("\tldr\t" + dstReg + ", [" + addrReg + "]"));
         }
+    }
+
+    /**
+     * 判断符号是否在当前目标文件内可直接解析：
+     * 1. private（static）一定在当前文件；
+     * 2. currentIR 里显式出现的全局变量或函数视为“本地定义”。
+     */
+    private boolean isDefinedHere(Entity ent) {
+        if (ent.isPrivate())
+            return true;
+        if (currentIR == null)
+            return false;
+        // 检查函数
+        for (DefinedFunction f : currentIR.definedFunctions()) {
+            if (f.name().equals(ent.name()))
+                return true;
+        }
+        // 检查带初始化或未初始化的全局变量
+        for (DefinedVariable v : currentIR.definedGlobalVariables()) {
+            if (v.name().equals(ent.name()))
+                return true;
+        }
+        for (DefinedVariable v : currentIR.definedCommonSymbols()) {
+            if (v.name().equals(ent.name()))
+                return true;
+        }
+        return false; // 其它情况视为外部符号
     }
 
 }
