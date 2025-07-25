@@ -223,37 +223,33 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             paramOffsets.put(ps.get(i), offset);
         }
 
-        // 计算所有局部变量的大小
-        long totalLocalSize = 0;
-        List<DefinedVariable> localVars = new ArrayList<>();
-        for (DefinedVariable v : f.lvarScope().allVariablesWithPrivate()) {
-            if (v.isParameter()) {
+        // 递归分配局部变量空间，允许不同block重叠
+        LocalScope root = f.lvarScope();
+        long totalLocalSize = allocateLocalVariablesRecursive(root, 0);
+        frameSize = (totalLocalSize + 15) & ~15;
+    }
+
+    // 递归分配局部变量空间，返回当前及所有子作用域最大所需空间
+    private long allocateLocalVariablesRecursive(LocalScope scope, long parentStackLen) {
+        long len = parentStackLen;
+        // 当前作用域变量顺序分配
+        for (DefinedVariable var : scope.localVariables()) {
+            if (var.isParameter() || var.isPrivate())
                 continue;
-            }
-            if (v.isPrivate()) {
-                continue; // static local -> data
-            }
-            localVars.add(v);
-            long alignment = v.type().alignment();
-            long sz = v.type().allocSize();
-            totalLocalSize = (totalLocalSize + alignment - 1) & ~alignment;
-            totalLocalSize += sz;
+            long alignment = var.type().alignment();
+            len = (len + alignment - 1) & ~alignment;
+            long sz = var.type().allocSize();
+            len += sz;
+            // 先设置为临时偏移，后面fix
+            localVarOffsets.put(var, -len);
         }
-
-        // frameSize需要局部变量的大小，对齐到16字节
-        frameSize = totalLocalSize;
-        frameSize = (frameSize + 15) & ~15;
-
-        // 从栈底开始分配局部变量，反转声明顺序
-        // 这样后声明的变量在栈底（地址更大），先声明的变量在栈顶（地址更小）
-        long currentOffset = 0;
-        for (int i = localVars.size() - 1; i >= 0; i--) {
-            DefinedVariable v = localVars.get(i);
-            long sz = v.type().allocSize();
-            long offset = -(frameSize - currentOffset); // 从栈底开始，负偏移
-            localVarOffsets.put(v, offset);
-            currentOffset += sz;
+        // 递归分配子作用域，空间可重叠
+        long maxLen = len;
+        for (LocalScope s : scope.children()) {
+            long childLen = allocateLocalVariablesRecursive(s, len);
+            maxLen = Math.max(maxLen, childLen);
         }
+        return maxLen;
     }
 
     private void genPrologue() {
