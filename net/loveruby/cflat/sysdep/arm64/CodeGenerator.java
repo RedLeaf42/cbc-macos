@@ -38,6 +38,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
     // per-function context
     private DefinedFunction currentFunction;
+    private IR currentIR; // 当前编译单元的IR
     private long frameSize; // size we sub after pushing FP/LR
     private final Map<Entity, Long> localVarOffsets = new HashMap<>();
     private final Map<Entity, Long> paramOffsets = new HashMap<>();
@@ -59,10 +60,53 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     /* ====== Entry ====== */
     @Override
     public AssemblyCode generate(IR ir) {
+        currentIR = ir; // 保存当前IR的引用
+        locateSymbols(ir);
         collectStaticLocals(ir);
         generateDataSection(ir);
         generateTextSection(ir);
         return assembly;
+    }
+
+    private void locateSymbols(IR ir) {
+        // 为所有函数设置符号引用
+        for (Function func : ir.allFunctions()) {
+            locateFunction(func);
+        }
+    }
+
+    private void locateFunction(Function func) {
+        func.setCallingSymbol(callingSymbol(func));
+        locateGlobalVariable(func);
+    }
+
+    private Symbol callingSymbol(Function func) {
+        if (func.isPrivate()) {
+            return new NamedSymbol(func.name());
+        } else {
+            return new NamedSymbol("_" + func.name());
+        }
+    }
+
+    private void locateGlobalVariable(Entity ent) {
+        Symbol sym;
+        if (ent instanceof Function) {
+            sym = ((Function) ent).callingSymbol();
+        } else {
+            // 对于非函数实体，使用符号名
+            String symbolName = ent.isPrivate() ? ent.name() : "_" + ent.name();
+            sym = new NamedSymbol(symbolName);
+        }
+
+        if (ent.isPrivate()) {
+            // 对于私有符号，使用直接地址
+            ent.setMemref(mem(sym));
+            ent.setAddress(imm(sym));
+        } else {
+            // 对于公共符号，也使用直接地址（ARM64 不使用 GOT）
+            ent.setMemref(mem(sym));
+            ent.setAddress(imm(sym));
+        }
     }
 
     private void collectStaticLocals(IR ir) {
@@ -189,12 +233,13 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
         calcFrameLayout(func);
 
-        Symbol fn = new NamedSymbol("_" + func.name());
-        func.setCallingSymbol(fn);
-        func.setMemref(mem(fn));
-        func.setAddress(imm(fn));
+        Symbol fn = func.callingSymbol();
 
-        assembly.add(new Directive("\t.globl\t_" + func.name()));
+        if (func.isPrivate()) {
+            assembly.add(new Directive("\t.private_extern\t" + fn.toSource()));
+        } else {
+            assembly.add(new Directive("\t.globl\t" + fn.toSource()));
+        }
         assembly.add(new Directive("\t.p2align\t2"));
         assembly.add(new Label(fn));
 
@@ -237,7 +282,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             if (var.isParameter() || var.isPrivate())
                 continue;
             long alignment = var.type().alignment();
-            len = (len + alignment - 1) & ~alignment;
+            len = (len + alignment - 1) & ~(alignment - 1);
             long sz = var.type().allocSize();
             len += sz;
             // 先设置为临时偏移，后面fix
@@ -756,14 +801,50 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             long off = paramOffsets.get(ent);
             assembly.add(new Directive("\tadd\t" + dst + ", x29, #" + off));
         } else {
-            // 对于外部符号，根据类型选择重定位方式
-            String symbolName = ent.isPrivate() ? ent.name() : "_" + ent.name();
-            if (ent.type().isFunction()) {
-                // 对于外部函数，使用@GOT重定位
-                assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@GOTPAGE"));
-                assembly.add(new Directive("\tldr\t" + dst + ", [" + dst + ", " + symbolName + "@GOTPAGEOFF]"));
+            // 使用预设的符号引用
+            if (ent.address() != null) {
+                // 如果有预设的地址，直接使用
+                if (ent.address() instanceof ImmediateValue) {
+                    ImmediateValue imm = (ImmediateValue) ent.address();
+                    if (imm.expr() instanceof Symbol) {
+                        Symbol sym = (Symbol) imm.expr();
+                        assembly.add(new Directive("\tadrp\t" + dst + ", " + sym.toSource() + "@PAGE"));
+                        assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + sym.toSource() + "@PAGEOFF"));
+                    } else {
+                        // 兜底方案
+                        String symbolName = ent.isPrivate() ? ent.name() : "_" + ent.name();
+                        assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@PAGE"));
+                        assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + symbolName + "@PAGEOFF"));
+                    }
+                } else {
+                    // 兜底方案
+                    String symbolName = ent.isPrivate() ? ent.name() : "_" + ent.name();
+                    assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@PAGE"));
+                    assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + symbolName + "@PAGEOFF"));
+                }
+            } else if (ent.memref() != null) {
+                // 如果有预设的内存引用，使用它
+                if (ent.memref() instanceof DirectMemoryReference) {
+                    DirectMemoryReference mem = (DirectMemoryReference) ent.memref();
+                    if (mem.value() instanceof Symbol) {
+                        Symbol sym = (Symbol) mem.value();
+                        assembly.add(new Directive("\tadrp\t" + dst + ", " + sym.toSource() + "@PAGE"));
+                        assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + sym.toSource() + "@PAGEOFF"));
+                    } else {
+                        // 兜底方案
+                        String symbolName = ent.isPrivate() ? ent.name() : "_" + ent.name();
+                        assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@PAGE"));
+                        assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + symbolName + "@PAGEOFF"));
+                    }
+                } else {
+                    // 兜底方案
+                    String symbolName = ent.isPrivate() ? ent.name() : "_" + ent.name();
+                    assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@PAGE"));
+                    assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + symbolName + "@PAGEOFF"));
+                }
             } else {
-                // 对于外部变量，使用@PAGE/@PAGEOFF重定位
+                // 兜底方案：动态生成重定位
+                String symbolName = ent.isPrivate() ? ent.name() : "_" + ent.name();
                 assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@PAGE"));
                 assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + symbolName + "@PAGEOFF"));
             }
@@ -825,10 +906,27 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             // 对于外部符号，根据类型选择重定位方式
             String symbolName = ent.isPrivate() ? ent.name() : "_" + ent.name();
             if (ent.type().isFunction()) {
-                // 对于外部函数，使用@GOT重定位，加载到x16避免覆盖x0中的参数
-                assembly.add(new Directive("\tadrp\tx16, " + symbolName + "@GOTPAGE"));
-                assembly.add(new Directive("\tldr\tx16, [x16, " + symbolName + "@GOTPAGEOFF]"));
-                assembly.add(new Directive("\tmov\tx0, x16"));
+                // 检查函数是否在当前编译单元中定义
+                boolean isDefinedInCurrentUnit = false;
+                if (currentIR != null) {
+                    for (DefinedFunction func : currentIR.definedFunctions()) {
+                        if (func.name().equals(ent.name())) {
+                            isDefinedInCurrentUnit = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (ent.isPrivate() || isDefinedInCurrentUnit) {
+                    // 对于静态函数或在当前编译单元中定义的函数，使用@PAGE/@PAGEOFF重定位
+                    assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
+                    assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+                } else {
+                    // 对于外部函数，使用@GOT重定位，加载到x16避免覆盖x0中的参数
+                    assembly.add(new Directive("\tadrp\tx16, " + symbolName + "@GOTPAGE"));
+                    assembly.add(new Directive("\tldr\tx16, [x16, " + symbolName + "@GOTPAGEOFF]"));
+                    assembly.add(new Directive("\tmov\tx0, x16"));
+                }
             } else {
                 // 对于外部变量，使用@PAGE/@PAGEOFF重定位
                 assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
