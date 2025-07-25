@@ -92,6 +92,9 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         for (DefinedVariable var : staticLocals) {
             locateGlobalVariable(var);
         }
+
+        // 为所有外部函数设置符号引用（这些函数在IR中通过Addr节点引用）
+        // 这里我们无法直接获取所有外部函数，但可以在addrOfEntity中动态处理
     }
 
     private void locateFunction(Function func) {
@@ -784,19 +787,44 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                     ImmediateValue imm = (ImmediateValue) ent.address();
                     if (imm.expr() instanceof Symbol) {
                         Symbol sym = (Symbol) imm.expr();
-                        assembly.add(new Directive("\tadrp\tx0, " + sym.toSource() + "@PAGE"));
-                        assembly.add(new Directive("\tadd\tx0, x0, " + sym.toSource() + "@PAGEOFF"));
+                        String symStr = sym.toSource();
+                        if (symStr.endsWith("@GOT")) {
+                            // 对于@GOT符号，使用@GOTPAGE和@GOTPAGEOFF重定位
+                            String baseSym = symStr.substring(0, symStr.length() - 4);
+                            assembly.add(new Directive("\tadrp\tx0, " + baseSym + "@GOTPAGE"));
+                            assembly.add(new Directive("\tldr\tx0, [x0, " + baseSym + "@GOTPAGEOFF]"));
+                        } else if (ent.type().isFunction() && !isDefinedHere(ent)) {
+                            // 对于外部函数，即使有预设符号，也要使用@GOT重定位
+                            assembly.add(new Directive("\tadrp\tx0, " + symStr + "@GOTPAGE"));
+                            assembly.add(new Directive("\tldr\tx0, [x0, " + symStr + "@GOTPAGEOFF]"));
+                        } else {
+                            // 对于普通符号，使用@PAGE和@PAGEOFF重定位
+                            assembly.add(new Directive("\tadrp\tx0, " + symStr + "@PAGE"));
+                            assembly.add(new Directive("\tadd\tx0, x0, " + symStr + "@PAGEOFF"));
+                        }
                     } else {
                         // 兜底方案
                         String symbolName = "_" + ent.name();
-                        assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
-                        assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+                        if (ent.type().isFunction() && !isDefinedHere(ent)) {
+                            // 对于外部函数，使用@GOT重定位
+                            assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@GOTPAGE"));
+                            assembly.add(new Directive("\tldr\tx0, [x0, " + symbolName + "@GOTPAGEOFF]"));
+                        } else {
+                            assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
+                            assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+                        }
                     }
                 } else {
                     // 兜底方案
                     String symbolName = "_" + ent.name();
-                    assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
-                    assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+                    if (ent.type().isFunction() && !isDefinedHere(ent)) {
+                        // 对于外部函数，使用@GOT重定位
+                        assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@GOTPAGE"));
+                        assembly.add(new Directive("\tldr\tx0, [x0, " + symbolName + "@GOTPAGEOFF]"));
+                    } else {
+                        assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
+                        assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+                    }
                 }
             } else if (ent.memref() != null) {
                 // 如果有预设的内存引用，使用它
@@ -804,8 +832,17 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                     DirectMemoryReference mem = (DirectMemoryReference) ent.memref();
                     if (mem.value() instanceof Symbol) {
                         Symbol sym = (Symbol) mem.value();
-                        assembly.add(new Directive("\tadrp\tx0, " + sym.toSource() + "@PAGE"));
-                        assembly.add(new Directive("\tadd\tx0, x0, " + sym.toSource() + "@PAGEOFF"));
+                        String symStr = sym.toSource();
+                        if (symStr.endsWith("@GOT")) {
+                            // 对于@GOT符号，使用@GOTPAGE和@GOTPAGEOFF重定位
+                            String baseSym = symStr.substring(0, symStr.length() - 4);
+                            assembly.add(new Directive("\tadrp\tx0, " + baseSym + "@GOTPAGE"));
+                            assembly.add(new Directive("\tldr\tx0, [x0, " + baseSym + "@GOTPAGEOFF]"));
+                        } else {
+                            // 对于普通符号，使用@PAGE和@PAGEOFF重定位
+                            assembly.add(new Directive("\tadrp\tx0, " + symStr + "@PAGE"));
+                            assembly.add(new Directive("\tadd\tx0, x0, " + symStr + "@PAGEOFF"));
+                        }
                     } else {
                         // 兜底方案
                         String symbolName = "_" + ent.name();
@@ -970,8 +1007,18 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                     ImmediateValue imm = (ImmediateValue) ent.address();
                     if (imm.expr() instanceof Symbol) {
                         Symbol sym = (Symbol) imm.expr();
-                        assembly.add(new Directive("\tadrp\t" + dst + ", " + sym.toSource() + "@PAGE"));
-                        assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + sym.toSource() + "@PAGEOFF"));
+                        String symStr = sym.toSource();
+                        if (symStr.endsWith("@GOT")) {
+                            // 对于@GOT符号，使用@GOTPAGE和@GOTPAGEOFF重定位
+                            String baseSym = symStr.substring(0, symStr.length() - 4);
+                            assembly.add(new Directive("\tadrp\t" + dst + ", " + baseSym + "@GOTPAGE"));
+                            assembly.add(
+                                    new Directive("\tldr\t" + dst + ", [" + dst + ", " + baseSym + "@GOTPAGEOFF]"));
+                        } else {
+                            // 对于普通符号，使用@PAGE和@PAGEOFF重定位
+                            assembly.add(new Directive("\tadrp\t" + dst + ", " + symStr + "@PAGE"));
+                            assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + symStr + "@PAGEOFF"));
+                        }
                     } else {
                         // 兜底方案
                         String symbolName = "_" + ent.name();
@@ -990,8 +1037,18 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                     DirectMemoryReference mem = (DirectMemoryReference) ent.memref();
                     if (mem.value() instanceof Symbol) {
                         Symbol sym = (Symbol) mem.value();
-                        assembly.add(new Directive("\tadrp\t" + dst + ", " + sym.toSource() + "@PAGE"));
-                        assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + sym.toSource() + "@PAGEOFF"));
+                        String symStr = sym.toSource();
+                        if (symStr.endsWith("@GOT")) {
+                            // 对于@GOT符号，使用@GOTPAGE和@GOTPAGEOFF重定位
+                            String baseSym = symStr.substring(0, symStr.length() - 4);
+                            assembly.add(new Directive("\tadrp\t" + dst + ", " + baseSym + "@GOTPAGE"));
+                            assembly.add(
+                                    new Directive("\tldr\t" + dst + ", [" + dst + ", " + baseSym + "@GOTPAGEOFF]"));
+                        } else {
+                            // 对于普通符号，使用@PAGE和@PAGEOFF重定位
+                            assembly.add(new Directive("\tadrp\t" + dst + ", " + symStr + "@PAGE"));
+                            assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + symStr + "@PAGEOFF"));
+                        }
                     } else {
                         // 兜底方案
                         String symbolName = "_" + ent.name();
