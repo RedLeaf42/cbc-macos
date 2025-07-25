@@ -663,7 +663,24 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             return;
         }
         if (e instanceof Mem) {
+            // 递归计算地址到 dst
             evalAddressInto(((Mem) e).expr(), dst);
+            // 对结果再做一次解引用，从 dst 指向的地址加载值到 dst
+            long sz = e.type().size();
+            if (sz == 1) {
+                assembly.add(new Directive("\tldrb\tw0, [" + dst + "]"));
+                assembly.add(new Directive("\tsxtb\t" + dst + ", w0"));
+            } else if (sz == 2) {
+                assembly.add(new Directive("\tldrh\tw0, [" + dst + "]"));
+                assembly.add(new Directive("\tsxth\t" + dst + ", w0"));
+            } else if (sz == 4) {
+                assembly.add(new Directive("\tldr\tw0, [" + dst + "]"));
+                assembly.add(new Directive("\tsxtw\t" + dst + ", w0"));
+            } else if (sz == 8) {
+                assembly.add(new Directive("\tldr\t" + dst + ", [" + dst + "]"));
+            } else {
+                errorHandler.error("unsupported load size: " + sz);
+            }
             return;
         }
         if (e instanceof Int) {
