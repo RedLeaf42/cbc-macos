@@ -769,7 +769,13 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             }
         } else if (paramOffsets.containsKey(ent)) {
             long off = paramOffsets.get(ent);
-            assembly.add(new Directive("\tadd\tx0, x29, #" + off));
+            if (off < 8) {
+                // 前8个参数保存在栈上，使用负数偏移
+                assembly.add(new Directive("\tsub\tx0, x29, #" + ((off + 1) * 8)));
+            } else {
+                // 其他参数在栈上，使用正数偏移
+                assembly.add(new Directive("\tadd\tx0, x29, #" + off));
+            }
         } else {
             // 使用预设的符号引用
             if (ent.address() != null) {
@@ -949,7 +955,13 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             }
         } else if (paramOffsets.containsKey(ent)) {
             long off = paramOffsets.get(ent);
-            assembly.add(new Directive("\tadd\t" + dst + ", x29, #" + off));
+            if (off < 8) {
+                // 前8个参数保存在栈上，使用负数偏移
+                assembly.add(new Directive("\tsub\t" + dst + ", x29, #" + ((off + 1) * 8)));
+            } else {
+                // 其他参数在栈上，使用正数偏移
+                assembly.add(new Directive("\tadd\t" + dst + ", x29, #" + off));
+            }
         } else {
             // 使用预设的符号引用
             if (ent.address() != null) {
