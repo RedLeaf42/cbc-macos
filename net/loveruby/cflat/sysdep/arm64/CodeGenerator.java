@@ -216,21 +216,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
      * [x29, #-16] - 局部变量2
      */
     private void calcFrameLayout(DefinedFunction f) {
-        // 局部变量从负偏移开始，从-8开始
-        long localSize = 0;
-        for (DefinedVariable v : f.lvarScope().allVariablesWithPrivate()) {
-            if (v.isParameter()) {
-                continue;
-            }
-            if (v.isPrivate()) {
-                continue; // static local -> data
-            }
-            long sz = (v.type().allocSize() + 7) & ~7;
-            long offset = -8 - localSize; // 负数偏移
-            localVarOffsets.put(v, offset);
-            localSize += sz;
-        }
-
         // 参数从正偏移开始，从+16开始（跳过保存的FP和返回地址）
         List<Parameter> ps = f.parameters();
         for (int i = 0; i < ps.size(); i++) {
@@ -238,12 +223,9 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             paramOffsets.put(ps.get(i), offset);
         }
 
-        // frameSize只需要局部变量的大小，参数在调用者栈帧中
-        frameSize = localSize;
-        frameSize = (frameSize + 15) & ~15;
-
-        // 重新计算偏移，从帧的底部开始分配
-        long currentOffset = 0;
+        // 计算所有局部变量的大小
+        long totalLocalSize = 0;
+        List<DefinedVariable> localVars = new ArrayList<>();
         for (DefinedVariable v : f.lvarScope().allVariablesWithPrivate()) {
             if (v.isParameter()) {
                 continue;
@@ -251,8 +233,24 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             if (v.isPrivate()) {
                 continue; // static local -> data
             }
+            localVars.add(v);
+            long alignment = v.type().alignment();
             long sz = v.type().allocSize();
-            long offset = -(frameSize - currentOffset); // 从帧的底部开始分配
+            totalLocalSize = (totalLocalSize+alignment-1)&~alignment;
+            totalLocalSize += sz;
+        }
+
+        // frameSize需要局部变量的大小，对齐到16字节
+        frameSize = totalLocalSize;
+        frameSize = (frameSize + 15) & ~15;
+
+        // 从栈底开始分配局部变量，反转声明顺序
+        // 这样后声明的变量在栈底（地址更大），先声明的变量在栈顶（地址更小）
+        long currentOffset = 0;
+        for (int i = localVars.size() - 1; i >= 0; i--) {
+            DefinedVariable v = localVars.get(i);
+            long sz = v.type().allocSize();
+            long offset = -(frameSize - currentOffset); // 从栈底开始，负偏移
             localVarOffsets.put(v, offset);
             currentOffset += sz;
         }
