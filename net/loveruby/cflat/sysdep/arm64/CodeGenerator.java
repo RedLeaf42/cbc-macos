@@ -191,7 +191,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 assembly.add(new Directive("\t.quad\t0"));
             }
         } else {
-            assembly.add(new Directive("\t.space\t" + var.type().size()));
+            assembly.add(new Directive("\t.space\t" + var.type().allocSize()));
         }
     }
 
@@ -261,17 +261,31 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
      * [x29, #-16] - 局部变量2
      */
     private void calcFrameLayout(DefinedFunction f) {
-        // 参数从正偏移开始，从+16开始（跳过保存的FP和返回地址）
+        // 在ARM64中，前8个参数在寄存器中，额外的参数在栈上
         List<Parameter> ps = f.parameters();
         for (int i = 0; i < ps.size(); i++) {
-            long offset = 16 + i * 8L; // 正数偏移
-            paramOffsets.put(ps.get(i), offset);
+            if (i < 8) {
+                // 前8个参数在寄存器中，使用特殊的偏移值表示
+                paramOffsets.put(ps.get(i), (long) i);
+            } else {
+                // 额外的参数在栈上
+                long offset = 16 + (i - 8) * 8L; // 正数偏移
+                paramOffsets.put(ps.get(i), offset);
+            }
         }
 
         // 递归分配局部变量空间，允许不同block重叠
         LocalScope root = f.lvarScope();
         long totalLocalSize = allocateLocalVariablesRecursive(root, 0);
-        frameSize = (totalLocalSize + 15) & ~15;
+
+        // 计算参数保存空间
+        long paramSaveSize = 0;
+        for (int i = 0; i < ps.size() && i < 8; i++) {
+            paramSaveSize += 8; // 每个参数占8字节
+        }
+
+        // 总栈帧大小 = 局部变量大小 + 参数保存空间
+        frameSize = totalLocalSize + paramSaveSize;
     }
 
     // 递归分配局部变量空间，返回当前及所有子作用域最大所需空间
@@ -300,16 +314,28 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     private void genPrologue() {
         assembly.add(new Directive("\tstp\tx29, x30, [sp, #-16]!"));
         assembly.add(new Directive("\tmov\tx29, sp"));
-        if (frameSize > 0)
-            assembly.add(new Directive("\tsub\tsp, sp, #" + frameSize));
 
-        // 参数已经在调用者栈帧中，不需要额外保存
-        // 参数可以通过 [x29, #+16], [x29, #+24] 等直接访问
+        // 保存参数寄存器到栈上，以便longjmp能够正确恢复
+        List<Parameter> ps = currentFunction.parameters();
+        for (int i = 0; i < ps.size() && i < 8; i++) {
+            String reg = "x" + i;
+            assembly.add(new Directive("\tstr\t" + reg + ", [x29, #-" + ((i + 1) * 8) + "]"));
+        }
+
+        // 分配局部变量空间，确保16字节对齐
+        if (frameSize > 0) {
+            // 确保frameSize是16字节对齐的
+            long alignedFrameSize = (frameSize + 15) & ~15;
+            assembly.add(new Directive("\tsub\tsp, sp, #" + alignedFrameSize));
+        }
     }
 
     private void genEpilogue() {
-        if (frameSize > 0)
-            assembly.add(new Directive("\tadd\tsp, sp, #" + frameSize));
+        if (frameSize > 0) {
+            // 确保frameSize是16字节对齐的
+            long alignedFrameSize = (frameSize + 15) & ~15;
+            assembly.add(new Directive("\tadd\tsp, sp, #" + alignedFrameSize));
+        }
         assembly.add(new Directive("\tldp\tx29, x30, [sp], #16"));
         assembly.add(new Directive("\tret"));
     }
@@ -905,21 +931,18 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         } else if (paramOffsets.containsKey(ent)) {
             long off = paramOffsets.get(ent);
             // 在 ARM64 中，前 8 个参数通过寄存器传递
-            // 参数索引从 0 开始，对应 x0, x1, x2, ...
-            int paramIndex = (int) ((off - 16) / 8); // 16 是栈帧基址，每个参数占 8 字节
-            if (paramIndex < 8) {
-                // 参数在寄存器中，直接使用
-                String reg = "x" + paramIndex;
+            if (off < 8) {
+                // 参数保存在栈上，从栈加载
                 if (sz == 8) {
-                    assembly.add(new Directive("\tmov\tx0, " + reg));
+                    assembly.add(new Directive("\tldr\tx0, [x29, #-" + ((off + 1) * 8) + "]"));
                 } else if (sz == 4) {
-                    assembly.add(new Directive("\tmov\tx0, " + reg));
+                    assembly.add(new Directive("\tldr\tw0, [x29, #-" + ((off + 1) * 8) + "]"));
                     assembly.add(new Directive("\tsxtw\tx0, w0"));
                 } else if (sz == 2) {
-                    assembly.add(new Directive("\tmov\tx0, " + reg));
+                    assembly.add(new Directive("\tldrh\tw0, [x29, #-" + ((off + 1) * 8) + "]"));
                     assembly.add(new Directive("\tsxth\tx0, w0"));
                 } else if (sz == 1) {
-                    assembly.add(new Directive("\tmov\tx0, " + reg));
+                    assembly.add(new Directive("\tldrb\tw0, [x29, #-" + ((off + 1) * 8) + "]"));
                     assembly.add(new Directive("\tsxtb\tx0, w0"));
                 } else {
                     errorHandler.error("unsupported load size: " + sz);

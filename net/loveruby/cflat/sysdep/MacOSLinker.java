@@ -40,7 +40,7 @@ class MacOSLinker implements Linker {
         if (!opts.noDefaultLibs) {
             cmd.add("-L/Library/Developer/CommandLineTools/SDKs/MacOSX14.4.sdk/usr/lib");
             cmd.add("-lc");
-            // cmd.add("-lcbc"); // Removed
+            cmd.add("-lcbc"); // Removed
         }
 
         cmd.add("-o");

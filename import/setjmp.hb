@@ -1,8 +1,8 @@
 // setjmp.hb
 
-// sizeof(jmp_buf)==156 on Linux/i386/glibc2.3.
-typedef char[156] jmp_buf;
-typedef char[156] sigjmp_buf;
+// sizeof(jmp_buf)==192 on ARM64 macOS
+typedef char[192] jmp_buf;
+typedef char[192] sigjmp_buf;
 
 extern int setjmp(jmp_buf buf);
 extern int sigsetjmp(sigjmp_buf buf, int savesigs);

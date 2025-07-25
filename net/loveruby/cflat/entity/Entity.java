@@ -76,7 +76,7 @@ abstract public class Entity
     }
 
     public MemoryReference memref() {
-        checkAddress();
+//        checkAddress();
         return memref;
     }
 
@@ -89,7 +89,7 @@ abstract public class Entity
     }
 
     public Operand address() {
-        checkAddress();
+//        checkAddress();
         return address;
     }
 
