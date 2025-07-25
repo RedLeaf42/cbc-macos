@@ -84,8 +84,30 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         if (func.isPrivate()) {
             return new NamedSymbol(func.name());
         } else {
-            return new NamedSymbol("_" + func.name());
+            Symbol sym = new NamedSymbol("_" + func.name());
+            return shouldUsePLT(func) ? PLTSymbol(sym) : sym;
         }
+    }
+
+    private boolean shouldUsePLT(Entity ent) {
+        if (!options.isPositionIndependent()) {
+            return false;
+        }
+
+        // 检查函数是否在当前编译单元中定义
+        if (ent instanceof Function && currentIR != null) {
+            for (DefinedFunction func : currentIR.definedFunctions()) {
+                if (func.name().equals(ent.name())) {
+                    return false; // 在当前编译单元中定义的函数不使用PLT
+                }
+            }
+        }
+
+        return true; // 外部函数使用PLT
+    }
+
+    private Symbol PLTSymbol(Symbol base) {
+        return new SuffixedSymbol(base, "@PLT");
     }
 
     private void locateGlobalVariable(Entity ent) {
@@ -98,15 +120,29 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             sym = new NamedSymbol(symbolName);
         }
 
-        if (ent.isPrivate()) {
-            // 对于私有符号，使用直接地址
-            ent.setMemref(mem(sym));
-            ent.setAddress(imm(sym));
+        if (options.isPositionIndependent()) {
+            if (ent.isPrivate() || optimizeGvarAccess(ent)) {
+                // 对于私有符号或在当前编译单元中定义的符号，使用@PAGE/@PAGEOFF
+                ent.setMemref(mem(sym));
+                ent.setAddress(imm(sym));
+            } else {
+                // 对于外部符号，使用@GOT重定位
+                ent.setMemref(mem(globalGOTSymbol(sym)));
+                ent.setAddress(imm(globalGOTSymbol(sym)));
+            }
         } else {
-            // 对于公共符号，也使用直接地址（ARM64 不使用 GOT）
+            // 非PIC模式，使用直接地址
             ent.setMemref(mem(sym));
             ent.setAddress(imm(sym));
         }
+    }
+
+    private boolean optimizeGvarAccess(Entity ent) {
+        return options.isPIERequired() && ent.isDefined();
+    }
+
+    private Symbol globalGOTSymbol(Symbol base) {
+        return new SuffixedSymbol(base, "@GOT");
     }
 
     private void collectStaticLocals(IR ir) {
@@ -133,8 +169,14 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         for (ConstantEntry ent : ir.constantTable().entries()) {
             Symbol sym = constSymbols.newSymbol();
             ent.setSymbol(sym);
-            ent.setMemref(mem(sym));
-            ent.setAddress(imm(sym));
+            if (options.isPositionIndependent()) {
+                // 在PIC模式下，字符串字面量使用@PAGE/@PAGEOFF重定位
+                ent.setMemref(mem(sym));
+                ent.setAddress(imm(sym));
+            } else {
+                ent.setMemref(mem(sym));
+                ent.setAddress(imm(sym));
+            }
             assembly.add(new Directive("\t.section\t__TEXT,__cstring,cstring_literals"));
             assembly.add(new Label(sym));
             assembly.add(new Directive("\t.asciz\t\"" + escapeString(ent.value()) + "\""));
@@ -234,14 +276,16 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         calcFrameLayout(func);
 
         Symbol fn = func.callingSymbol();
+        // 对于函数定义，我们使用不带@PLT后缀的符号名
+        String funcName = func.isPrivate() ? func.name() : "_" + func.name();
 
         if (func.isPrivate()) {
-            assembly.add(new Directive("\t.private_extern\t" + fn.toSource()));
+            assembly.add(new Directive("\t.private_extern\t" + funcName));
         } else {
-            assembly.add(new Directive("\t.globl\t" + fn.toSource()));
+            assembly.add(new Directive("\t.globl\t" + funcName));
         }
         assembly.add(new Directive("\t.p2align\t2"));
-        assembly.add(new Label(fn));
+        assembly.add(new Label(new NamedSymbol(funcName)));
 
         genPrologue();
         for (Stmt s : func.ir())
@@ -930,38 +974,73 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             }
         } else if (paramOffsets.containsKey(ent)) {
             long off = paramOffsets.get(ent);
-            // 在 ARM64 中，前 8 个参数通过寄存器传递
-            if (off < 8) {
-                // 参数保存在栈上，从栈加载
+            // 对于参数，优先从局部变量位置加载（如果存在）
+            if (localVarOffsets.containsKey(ent)) {
+                long localOff = localVarOffsets.get(ent);
                 if (sz == 8) {
-                    assembly.add(new Directive("\tldr\tx0, [x29, #-" + ((off + 1) * 8) + "]"));
+                    if (localOff >= 0) {
+                        assembly.add(new Directive("\tldr\tx0, [x29, #" + localOff + "]"));
+                    } else {
+                        assembly.add(new Directive("\tldr\tx0, [x29, #-" + (-localOff) + "]"));
+                    }
                 } else if (sz == 4) {
-                    assembly.add(new Directive("\tldr\tw0, [x29, #-" + ((off + 1) * 8) + "]"));
+                    if (localOff >= 0) {
+                        assembly.add(new Directive("\tldr\tw0, [x29, #" + localOff + "]"));
+                    } else {
+                        assembly.add(new Directive("\tldr\tw0, [x29, #-" + (-localOff) + "]"));
+                    }
                     assembly.add(new Directive("\tsxtw\tx0, w0"));
                 } else if (sz == 2) {
-                    assembly.add(new Directive("\tldrh\tw0, [x29, #-" + ((off + 1) * 8) + "]"));
+                    if (localOff >= 0) {
+                        assembly.add(new Directive("\tldrh\tw0, [x29, #" + localOff + "]"));
+                    } else {
+                        assembly.add(new Directive("\tldrh\tw0, [x29, #-" + (-localOff) + "]"));
+                    }
                     assembly.add(new Directive("\tsxth\tx0, w0"));
                 } else if (sz == 1) {
-                    assembly.add(new Directive("\tldrb\tw0, [x29, #-" + ((off + 1) * 8) + "]"));
+                    if (localOff >= 0) {
+                        assembly.add(new Directive("\tldrb\tw0, [x29, #" + localOff + "]"));
+                    } else {
+                        assembly.add(new Directive("\tldrb\tw0, [x29, #-" + (-localOff) + "]"));
+                    }
                     assembly.add(new Directive("\tsxtb\tx0, w0"));
                 } else {
                     errorHandler.error("unsupported load size: " + sz);
                 }
             } else {
-                // 参数在栈上，从栈加载
-                if (sz == 8) {
-                    assembly.add(new Directive("\tldr\tx0, [x29, #" + off + "]"));
-                } else if (sz == 4) {
-                    assembly.add(new Directive("\tldr\tw0, [x29, #" + off + "]"));
-                    assembly.add(new Directive("\tsxtw\tx0, w0"));
-                } else if (sz == 2) {
-                    assembly.add(new Directive("\tldrh\tw0, [x29, #" + off + "]"));
-                    assembly.add(new Directive("\tsxth\tx0, w0"));
-                } else if (sz == 1) {
-                    assembly.add(new Directive("\tldrb\tw0, [x29, #" + off + "]"));
-                    assembly.add(new Directive("\tsxtb\tx0, w0"));
+                // 在 ARM64 中，前 8 个参数通过寄存器传递
+                if (off < 8) {
+                    // 参数保存在栈上，从栈加载
+                    if (sz == 8) {
+                        assembly.add(new Directive("\tldr\tx0, [x29, #-" + ((off + 1) * 8) + "]"));
+                    } else if (sz == 4) {
+                        assembly.add(new Directive("\tldr\tw0, [x29, #-" + ((off + 1) * 8) + "]"));
+                        assembly.add(new Directive("\tsxtw\tx0, w0"));
+                    } else if (sz == 2) {
+                        assembly.add(new Directive("\tldrh\tw0, [x29, #-" + ((off + 1) * 8) + "]"));
+                        assembly.add(new Directive("\tsxth\tx0, w0"));
+                    } else if (sz == 1) {
+                        assembly.add(new Directive("\tldrb\tw0, [x29, #-" + ((off + 1) * 8) + "]"));
+                        assembly.add(new Directive("\tsxtb\tx0, w0"));
+                    } else {
+                        errorHandler.error("unsupported load size: " + sz);
+                    }
                 } else {
-                    errorHandler.error("unsupported load size: " + sz);
+                    // 参数在栈上，从栈加载
+                    if (sz == 8) {
+                        assembly.add(new Directive("\tldr\tx0, [x29, #" + off + "]"));
+                    } else if (sz == 4) {
+                        assembly.add(new Directive("\tldr\tw0, [x29, #" + off + "]"));
+                        assembly.add(new Directive("\tsxtw\tx0, w0"));
+                    } else if (sz == 2) {
+                        assembly.add(new Directive("\tldrh\tw0, [x29, #" + off + "]"));
+                        assembly.add(new Directive("\tsxth\tx0, w0"));
+                    } else if (sz == 1) {
+                        assembly.add(new Directive("\tldrb\tw0, [x29, #" + off + "]"));
+                        assembly.add(new Directive("\tsxtb\tx0, w0"));
+                    } else {
+                        errorHandler.error("unsupported load size: " + sz);
+                    }
                 }
             }
         } else {
@@ -979,15 +1058,21 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                     }
                 }
 
-                if (ent.isPrivate() || isDefinedInCurrentUnit) {
-                    // 对于静态函数或在当前编译单元中定义的函数，使用@PAGE/@PAGEOFF重定位
+                if (options.isPositionIndependent()) {
+                    if (ent.isPrivate() || isDefinedInCurrentUnit) {
+                        // 对于静态函数或在当前编译单元中定义的函数，使用@PAGE/@PAGEOFF重定位
+                        assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
+                        assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+                    } else {
+                        // 对于外部函数，使用@GOT重定位，加载到x16避免覆盖x0中的参数
+                        assembly.add(new Directive("\tadrp\tx16, " + symbolName + "@GOTPAGE"));
+                        assembly.add(new Directive("\tldr\tx16, [x16, " + symbolName + "@GOTPAGEOFF]"));
+                        assembly.add(new Directive("\tmov\tx0, x16"));
+                    }
+                } else {
+                    // 非PIC模式，使用@PAGE/@PAGEOFF重定位
                     assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
                     assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
-                } else {
-                    // 对于外部函数，使用@GOT重定位，加载到x16避免覆盖x0中的参数
-                    assembly.add(new Directive("\tadrp\tx16, " + symbolName + "@GOTPAGE"));
-                    assembly.add(new Directive("\tldr\tx16, [x16, " + symbolName + "@GOTPAGEOFF]"));
-                    assembly.add(new Directive("\tmov\tx0, x16"));
                 }
             } else {
                 // 对于外部变量，使用@PAGE/@PAGEOFF重定位
@@ -1048,7 +1133,25 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             }
         } else if (paramOffsets.containsKey(ent)) {
             long off = paramOffsets.get(ent);
-            assembly.add(new Directive("\tstr\t" + src + ", [x29, #" + off + "]"));
+            // 对于参数，我们需要将其存储到局部变量空间中
+            // 首先检查是否已经有局部变量偏移
+            if (localVarOffsets.containsKey(ent)) {
+                long localOff = localVarOffsets.get(ent);
+                if (localOff >= 0) {
+                    assembly.add(new Directive("\tstr\t" + src + ", [x29, #" + localOff + "]"));
+                } else {
+                    assembly.add(new Directive("\tstr\t" + src + ", [x29, #-" + (-localOff) + "]"));
+                }
+            } else {
+                // 如果没有局部变量偏移，使用参数偏移
+                if (off < 8) {
+                    // 前8个参数保存在栈上
+                    assembly.add(new Directive("\tstr\t" + src + ", [x29, #-" + ((off + 1) * 8) + "]"));
+                } else {
+                    // 其他参数在栈上
+                    assembly.add(new Directive("\tstr\t" + src + ", [x29, #" + off + "]"));
+                }
+            }
         } else {
             // 对于外部符号，根据类型选择重定位方式
             String symbolName = ent.isPrivate() ? ent.name() : "_" + ent.name();
