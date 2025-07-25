@@ -236,7 +236,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             localVars.add(v);
             long alignment = v.type().alignment();
             long sz = v.type().allocSize();
-            totalLocalSize = (totalLocalSize+alignment-1)&~alignment;
+            totalLocalSize = (totalLocalSize + alignment - 1) & ~alignment;
             totalLocalSize += sz;
         }
 
@@ -785,21 +785,45 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 } else {
                     assembly.add(new Directive("\tldr\tx0, [x29, #-" + (-off) + "]"));
                 }
-            } else {
+            } else if (sz == 4) {
                 if (off >= 0) {
                     assembly.add(new Directive("\tldr\tw0, [x29, #" + off + "]"));
                 } else {
                     assembly.add(new Directive("\tldr\tw0, [x29, #-" + (-off) + "]"));
                 }
                 assembly.add(new Directive("\tsxtw\tx0, w0"));
+            } else if (sz == 2) {
+                if (off >= 0) {
+                    assembly.add(new Directive("\tldrh\tw0, [x29, #" + off + "]"));
+                } else {
+                    assembly.add(new Directive("\tldrh\tw0, [x29, #-" + (-off) + "]"));
+                }
+                assembly.add(new Directive("\tsxth\tx0, w0"));
+            } else if (sz == 1) {
+                if (off >= 0) {
+                    assembly.add(new Directive("\tldrb\tw0, [x29, #" + off + "]"));
+                } else {
+                    assembly.add(new Directive("\tldrb\tw0, [x29, #-" + (-off) + "]"));
+                }
+                assembly.add(new Directive("\tsxtb\tx0, w0"));
+            } else {
+                errorHandler.error("unsupported load size: " + sz);
             }
         } else if (paramOffsets.containsKey(ent)) {
             long off = paramOffsets.get(ent);
             if (sz == 8) {
                 assembly.add(new Directive("\tldr\tx0, [x29, #" + off + "]"));
-            } else {
+            } else if (sz == 4) {
                 assembly.add(new Directive("\tldr\tw0, [x29, #" + off + "]"));
                 assembly.add(new Directive("\tsxtw\tx0, w0"));
+            } else if (sz == 2) {
+                assembly.add(new Directive("\tldrh\tw0, [x29, #" + off + "]"));
+                assembly.add(new Directive("\tsxth\tx0, w0"));
+            } else if (sz == 1) {
+                assembly.add(new Directive("\tldrb\tw0, [x29, #" + off + "]"));
+                assembly.add(new Directive("\tsxtb\tx0, w0"));
+            } else {
+                errorHandler.error("unsupported load size: " + sz);
             }
         } else {
             // 对于外部符号，根据类型选择重定位方式
@@ -816,9 +840,17 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             }
             if (sz == 8) {
                 assembly.add(new Directive("\tldr\tx0, [x0]"));
-            } else {
+            } else if (sz == 4) {
                 assembly.add(new Directive("\tldr\tw0, [x0]"));
                 assembly.add(new Directive("\tsxtw\tx0, w0"));
+            } else if (sz == 2) {
+                assembly.add(new Directive("\tldrh\tw0, [x0]"));
+                assembly.add(new Directive("\tsxth\tx0, w0"));
+            } else if (sz == 1) {
+                assembly.add(new Directive("\tldrb\tw0, [x0]"));
+                assembly.add(new Directive("\tsxtb\tx0, w0"));
+            } else {
+                errorHandler.error("unsupported load size: " + sz);
             }
         }
     }
@@ -834,13 +866,29 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 } else {
                     assembly.add(new Directive("\tstr\t" + src + ", [x29, #-" + (-off) + "]"));
                 }
-            } else {
+            } else if (sz == 4) {
                 String w = "w" + src.name().substring(1);
                 if (off >= 0) {
                     assembly.add(new Directive("\tstr\t" + w + ", [x29, #" + off + "]"));
                 } else {
                     assembly.add(new Directive("\tstr\t" + w + ", [x29, #-" + (-off) + "]"));
                 }
+            } else if (sz == 2) {
+                String w = "w" + src.name().substring(1);
+                if (off >= 0) {
+                    assembly.add(new Directive("\tstrh\t" + w + ", [x29, #" + off + "]"));
+                } else {
+                    assembly.add(new Directive("\tstrh\t" + w + ", [x29, #-" + (-off) + "]"));
+                }
+            } else if (sz == 1) {
+                String w = "w" + src.name().substring(1);
+                if (off >= 0) {
+                    assembly.add(new Directive("\tstrb\t" + w + ", [x29, #" + off + "]"));
+                } else {
+                    assembly.add(new Directive("\tstrb\t" + w + ", [x29, #-" + (-off) + "]"));
+                }
+            } else {
+                errorHandler.error("unsupported store size: " + sz);
             }
         } else if (paramOffsets.containsKey(ent)) {
             long off = paramOffsets.get(ent);
