@@ -5,7 +5,7 @@ TARGET = libcbc.a
 # 检测架构
 ARCH := $(shell uname -m)
 ifeq ($(ARCH),arm64)
-	OBJS = stdarg.o alloca_arm64.o
+	OBJS = stdarg.o alloca_arm64.o va_init_arm64.o
 else
 	OBJS = stdarg.o alloca.o
 endif
@@ -30,8 +30,11 @@ stdarg.o: stdarg.cb
 alloca_arm64.o: alloca_arm64.s
 	$(CC) $(CFLAGS) -c $< -o $@
 
+va_init_arm64.o: va_init_arm64.s
+	$(CC) $(CFLAGS) -c $< -o $@
+
 sizeof_jmpbuf: sizeof_jmpbuf.c
 	$(CC) $(CFLAGS) -o $@ $<
 
 clean:
-	rm -f $(TARGET) *.o stdarg.s alloca_arm64.s
+	rm -f $(TARGET) *.o stdarg.s
