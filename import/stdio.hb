@@ -9,6 +9,9 @@ typedef unsigned long FILE;   // dummy
 extern FILE* stdin;
 extern FILE* stdout;
 extern FILE* stderr;
+extern FILE* __stdinp;
+extern FILE* __stdoutp;
+extern FILE* __stderrp;
 
 extern FILE* fopen(char* path, char* mode);
 extern FILE* fdopen(int fd, char* mode);

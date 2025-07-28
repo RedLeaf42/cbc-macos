@@ -402,7 +402,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         if (frameSize > 0) {
             // 确保frameSize是16字节对齐的
             long alignedFrameSize = (frameSize + 15) & ~15;
-            assembly.add(new Directive("\tadd\tsp, sp, #" + alignedFrameSize));
+            assembly.add(new Directive("\tmov\tsp, x29"));
         }
         assembly.add(new Directive("\tldp\tx29, x30, [sp], #16"));
         assembly.add(new Directive("\tret"));
