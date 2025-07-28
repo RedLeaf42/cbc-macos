@@ -206,12 +206,10 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
         // 2. initialized globals (both public and private) 初始化的静态/非静态全局变量
         for (DefinedVariable var : ir.definedGlobalVariables()) {
-            System.out.println("Debug global var = " + var.name());
             emitInitializedGlobal(var, !var.isPrivate(), ir);
         }
         // 3. static locals (private in IR) 没有初始化的静态全局变量
         for (DefinedVariable var : staticLocals) {
-            System.out.println("Debug static var = " + var.name());
             emitInitializedGlobal(var, false, ir);
         }
         // 4. common (tentative) symbols 没有初始化的全局变量,理论上来说不应该包含静态变量的
@@ -236,7 +234,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         if (external) {
             assembly.add(new Directive("\t.globl\t" + symbolName));
         } else {
-            System.out.println("Debug private_extern\t " + var.name());
             assembly.add(new Directive("\t.private_extern\t" + symbolName));
         }
         assembly.add(new Label(sym));
@@ -420,13 +417,14 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 e.function().type().getFunctionType().isVararg();
 
         int total = args.size();
+        System.err.println("Debug total params = " + total);
         int fixed = 0;
         if (e.isStaticCall()) {
             fixed = e.function().type().getFunctionType().paramTypes().size();
         }
 
         int stackArgs = Math.max(0, total - ARG_REGS.length);
-        int shadow = isVar ? 64 : 0;
+        int shadow = isVar ? 8 * total : 0;
         int temp = total * 8;
         int block = shadow + stackArgs * 8 + temp;
         block = (block + 15) & ~15;
@@ -436,8 +434,8 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
         int tempBase = shadow + stackArgs * 8;
 
-        // Pass1: R->L
-        for (int i = total - 1; i >= 0; --i) {
+        // Pass1: L->R
+        for (int i = 0; i < total; ++i) {
             args.get(i).accept(this); // x0
             assembly.add(new Directive("\tstr\tx0, [sp, #" + (tempBase + i * 8L) + "]"));
         }
@@ -472,6 +470,11 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         }
 
         if (e.isStaticCall()) {
+            // 对于变长参数函数，我们需要特殊处理va_init调用
+            if (e.function().name().equals("va_init")) {
+                // va_init期望接收当前栈指针的值
+                assembly.add(new Directive("\tmov\tx0, sp"));
+            }
             assembly.add(new Directive("\tbl\t" + e.function().callingSymbol().toSource()));
         } else {
             // 对于间接函数调用，需要将函数地址加载到不同的寄存器，避免覆盖x0中的参数
@@ -863,9 +866,9 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                     assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@GOTPAGE"));
                     assembly.add(new Directive("\tldr\tx0, [x0, " + symbolName + "@GOTPAGEOFF]"));
                 } else {
-                    // 对于外部变量，使用@PAGE/@PAGEOFF重定位
-                    assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
-                    assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+                    // 对于外部变量，也使用@GOT重定位
+                    assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@GOTPAGE"));
+                    assembly.add(new Directive("\tldr\tx0, [x0, " + symbolName + "@GOTPAGEOFF]"));
                 }
             }
         }
@@ -1064,8 +1067,15 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             } else {
                 // 兜底方案：动态生成重定位
                 String symbolName = "_" + ent.name();
-                assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@GOTPAGE"));
-                assembly.add(new Directive("\tldr\t" + dst + ", [" + dst + ", " + symbolName + "@GOTPAGEOFF]"));
+                if (ent.type().isFunction()) {
+                    // 对于外部函数，使用@GOT重定位
+                    assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@GOTPAGE"));
+                    assembly.add(new Directive("\tldr\t" + dst + ", [" + dst + ", " + symbolName + "@GOTPAGEOFF]"));
+                } else {
+                    // 对于外部变量，也使用@GOT重定位
+                    assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@GOTPAGE"));
+                    assembly.add(new Directive("\tldr\t" + dst + ", [" + dst + ", " + symbolName + "@GOTPAGEOFF]"));
+                }
             }
         }
     }
@@ -1208,9 +1218,9 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                     assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
                 }
             } else {
-                // 对于外部变量，使用@PAGE/@PAGEOFF重定位
-                assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
-                assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+                // 对于外部变量，使用@GOT重定位
+                assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@GOTPAGE"));
+                assembly.add(new Directive("\tldr\tx0, [x0, " + symbolName + "@GOTPAGEOFF]"));
             }
             if (sz == 8) {
                 assembly.add(new Directive("\tldr\tx0, [x0]"));
@@ -1293,9 +1303,9 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@GOTPAGE"));
                 assembly.add(new Directive("\tldr\tx0, [x0, " + symbolName + "@GOTPAGEOFF]"));
             } else {
-                // 对于外部变量，使用@PAGE/@PAGEOFF重定位
-                assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
-                assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+                // 对于外部变量，使用@GOT重定位
+                assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@GOTPAGE"));
+                assembly.add(new Directive("\tldr\tx0, [x0, " + symbolName + "@GOTPAGEOFF]"));
             }
             assembly.add(new Directive("\tstr\t" + src + ", [x0]"));
         }
