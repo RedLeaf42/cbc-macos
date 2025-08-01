@@ -10,7 +10,7 @@ public class CodeGeneratorOptions {
         optimizeLevel = 0;
         generatePIC = false;
         generatePIE = false;
-        verboseAsm = false;
+        verboseAsm =  true;
     }
 
     public void setOptimizationLevel(int level) {

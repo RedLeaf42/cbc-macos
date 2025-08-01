@@ -5,5 +5,5 @@ public class LinkerOptions {
     public boolean generatingPIE = false;
     public boolean noStartFiles = false;
     public boolean noDefaultLibs = false;
-    public boolean verbose = false;
+    public boolean verbose = true;
 }
