@@ -495,8 +495,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         }
 
         // 这里使用sp保存的一个问题在于，如果是调用的alloca，恢复的时候会导致栈破坏
-        boolean shouldSaveCallerRegister = !e.function().name().equals("alloca");
-        System.err.println("call "+e.function().name());
+        boolean shouldSaveCallerRegister = !e.isStaticCall() || !e.function().name().equals("alloca");
         if (shouldSaveCallerRegister) {
             assembly.add(new Directive("\tstp\tx9, x10, [sp, #-16]!"));
             assembly.add(new Directive("\tstp\tx11, x12, [sp, #-16]!"));
