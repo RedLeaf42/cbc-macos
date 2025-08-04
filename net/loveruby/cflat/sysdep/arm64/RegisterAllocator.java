@@ -105,11 +105,6 @@ public class RegisterAllocator {
                     return null;
                 }
 
-                @Override
-                public Void visit(Mem e) {
-                    System.out.println("Mem Entity: "+e.expr().toString());
-                    return null;
-                }
             });
         }
         System.err.println("collectAddressTakenVars needsAddress: "+needsAddress.stream().map(Entity::name).collect(Collectors.toList()));
