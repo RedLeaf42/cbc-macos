@@ -45,6 +45,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
     private static final Register VAL_TMP = Register.X9; // 仅用于保存值(RHS等)
     private static final Register ADR_TMP0 = Register.X11; // 地址计算用
+    private static final Register OFFT = Register.X12;
     private static final Register TMP0 = Register.X13;
     private static final Register CALL_TMP = Register.X16;
 
@@ -334,6 +335,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             long offset = localVarOffsets.get(entity);
             localVarOffsets.put(entity, offset-allocatedRegisterSize);
         }
+        registerAllocator.adjustSpill(paramOffsets, localVarOffsets);
         // 获取分配结果
         for (DefinedVariable var : func.localVariables()) {
             Entity entity = var;
@@ -566,7 +568,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             assembly.add(new Directive("\tadd\tsp, sp, #" + block));
 
         // 恢复caller-saved寄存器，使用ldp保持16字节对齐
-        assembly.add(new Directive("\tldp\tx15,x16, [sp], #16"));
+        assembly.add(new Directive("\tldp\tx15, x16, [sp], #16"));
         assembly.add(new Directive("\tldp\tx13, x14, [sp], #16"));
         assembly.add(new Directive("\tldp\tx11, x12, [sp], #16"));
         assembly.add(new Directive("\tldp\tx9, x10, [sp], #16"));
@@ -1006,11 +1008,10 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         }
     }
 
-    private static final Register ADDR = Register.X11;
-    private static final Register OFFT = Register.X12;
+
 
     private void evalAddress(Expr e) {
-        evalAddressInto(e, ADDR.toString());
+        evalAddressInto(e, ADR_TMP0 .toString());
     }
 
     private void evalAddressInto(Expr e, String dst) {

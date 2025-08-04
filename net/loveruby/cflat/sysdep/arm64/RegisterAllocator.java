@@ -4,6 +4,7 @@ import net.loveruby.cflat.entity.*;
 import net.loveruby.cflat.ir.*;
 
 import java.util.*;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -28,18 +29,18 @@ public class RegisterAllocator {
 //            net.loveruby.cflat.sysdep.arm64.Register.X9,
             net.loveruby.cflat.sysdep.arm64.Register.X10,
 //            net.loveruby.cflat.sysdep.arm64.Register.X11,
-            net.loveruby.cflat.sysdep.arm64.Register.X12,
+//            net.loveruby.cflat.sysdep.arm64.Register.X12,
 //            net.loveruby.cflat.sysdep.arm64.Register.X13,
             net.loveruby.cflat.sysdep.arm64.Register.X14,
             net.loveruby.cflat.sysdep.arm64.Register.X15
     };
 
     // 当前可用的寄存器
-    private Set<net.loveruby.cflat.sysdep.arm64.Register> availableCalleeSaved = new HashSet<>(Arrays.asList(CALLEE_SAVED));
-    private Set<Register> availableCallerSaved = new HashSet<>(Arrays.asList(CALLER_SAVED));
+    private Set<net.loveruby.cflat.sysdep.arm64.Register> availableCalleeSaved = new LinkedHashSet<>(Arrays.asList(CALLEE_SAVED));
+    private Set<Register> availableCallerSaved = new LinkedHashSet<>(Arrays.asList(CALLER_SAVED));
 
     // 变量到寄存器的映射
-    private Map<Entity, net.loveruby.cflat.sysdep.arm64.Register> registerMap = new HashMap<>();
+    private Map<Entity, net.loveruby.cflat.sysdep.arm64.Register> registerMap = new LinkedHashMap<>();
 
     // 溢出到栈上的变量
     private Map<Entity, Long> spillOffsets = new HashMap<>();
@@ -47,7 +48,7 @@ public class RegisterAllocator {
     // 活跃变量分析结果
     private final Map<Stmt, Set<Entity>> liveBefore = new HashMap<>();
     private final Map<Stmt, Set<Entity>> liveAfter = new HashMap<>();
-    private final Set<Entity> needsAddress = new HashSet<>();
+    private final Set<Entity> needsAddress = new LinkedHashSet<>();
 
     // 变量生命周期
     private final Map<Entity, LifeRange> lifeRanges = new HashMap<>();
@@ -93,23 +94,31 @@ public class RegisterAllocator {
     }
 
     private void collectAddressTakenVars(List<Stmt> statements) {
+        System.err.println("collectAddressTakenVars start");
         needsAddress.clear();
         for (Stmt stmt : statements) {
             stmt.accept(new DefaultIRVisitor<Void, Void>() {
                 @Override
                 public Void visit(Addr e) {
+                    System.err.println("Address entity: "+e.entity().name());
                     needsAddress.add(e.entity());
+                    return null;
+                }
+
+                @Override
+                public Void visit(Mem e) {
+                    System.out.println("Mem Entity: "+e.expr().toString());
                     return null;
                 }
             });
         }
+        System.err.println("collectAddressTakenVars needsAddress: "+needsAddress.stream().map(Entity::name).collect(Collectors.toList()));
     }
 
     /**
      * 活跃变量分析
      */
     private void analyzeLiveVariables(List<Stmt> statements) {
-        needsAddress.clear();
         liveBefore.clear();
         liveAfter.clear();
         // 初始化所有语句的活跃变量集合
@@ -270,6 +279,14 @@ public class RegisterAllocator {
         }
     }
 
+    public void adjustSpill(
+            Map<Entity, Long> paramOffsets,
+            Map<Entity, Long> localVarOffsets
+    ) {
+        spillOffsets.putAll(localVarOffsets);
+        spillOffsets.putAll(paramOffsets);
+    }
+
     /**
      * 分配寄存器
      */
@@ -285,9 +302,9 @@ public class RegisterAllocator {
         spillOffsets.putAll(paramOffsets);
         sortedRanges.sort((a, b) -> {
             // 优先分配跨越函数调用的变量到callee-saved寄存器
-            if (a.crossesCall != b.crossesCall) {
-                return a.crossesCall ? -1 : 1;
-            }
+//            if (a.crossesCall != b.crossesCall) {
+//                return a.crossesCall ? -1 : 1;
+//            }
             // 其次按生命周期长度排序
             int aLength = a.endPoint - a.startPoint;
             int bLength = b.endPoint - b.startPoint;
@@ -298,7 +315,7 @@ public class RegisterAllocator {
         for (LifeRange range : sortedRanges) {
             // 如果对其中一个Entity取了地址，那么就不分配寄存器
             // 如果这个Entity是参数，暂时也不分配寄存器,原因是因为这里还没有处理好参数保存到寄存器的逻辑
-            System.err.println("try allocate for "+range.entity.name() + " paramsOffsets.containKey = "+parameters.contains(range.entity) + " global.containKey = "+globalVariable.contains(range.entity));
+            System.err.println("try allocate for "+range.entity.name() + " range: [" +range.startPoint+ ","+range.endPoint+"] " + " paramsOffsets.containKey = "+parameters.contains(range.entity) + " global.containKey = "+globalVariable.contains(range.entity));
             if (needsAddress.contains(range.entity) || parameters.contains(range.entity) || globalVariable.contains(range.entity)) continue;
             Register reg = allocateRegister(range);
             if (reg != null) {
