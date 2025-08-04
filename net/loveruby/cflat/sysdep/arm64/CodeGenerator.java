@@ -77,7 +77,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     @Override
     public AssemblyCode generate(IR ir) {
         currentIR = ir; // 保存当前IR的引用
-        System.err.println("generate: "+ir.allGlobalVariables().stream().map((java.util.function.Function<Variable, Object>) Entity::name).collect(Collectors.toList()));
+        System.err.println("generate: " + ir.allGlobalVariables().stream().map((java.util.function.Function<Variable, Object>) Entity::name).collect(Collectors.toList()));
         collectStaticLocals(ir);
         locateSymbols(ir);
         // 为静态变量设置符号引用
@@ -313,8 +313,8 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         // todo 这里对于caller的寄存器可以不保存
         // 重新进行寄存器分配（确保获取最新结果）
         registerAllocator.allocateRegisters(func, paramOffsets, localVarOffsets, currentIR.allGlobalVariables());
-        long allocatedRegisterSize = registerAllocator.getAllocatedRegisterOrderedList().size()* 8L;
-        System.out.println("frameSize original "+frameSize + " registerSize="+allocatedRegisterSize);
+        long allocatedRegisterSize = registerAllocator.getAllocatedRegisterOrderedList().size() * 8L;
+        System.out.println("frameSize original " + frameSize + " registerSize=" + allocatedRegisterSize);
         frameSize += allocatedRegisterSize;
         /*
          * 调整偏移量
@@ -329,11 +329,11 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
         for (Entity entity : fixOffsetEntityList) {
             long offset = paramOffsets.get(entity);
-            paramOffsets.put(entity, offset-allocatedRegisterSize);
+            paramOffsets.put(entity, offset - allocatedRegisterSize);
         }
-        for (Entity entity: localVarOffsets.keySet()) {
+        for (Entity entity : localVarOffsets.keySet()) {
             long offset = localVarOffsets.get(entity);
-            localVarOffsets.put(entity, offset-allocatedRegisterSize);
+            localVarOffsets.put(entity, offset - allocatedRegisterSize);
         }
         registerAllocator.adjustSpill(paramOffsets, localVarOffsets);
         // 获取分配结果
@@ -392,7 +392,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         for (int i = 0; i < ps.size(); i++) {
             if (i < 8) {
                 // 前8个参数在寄存器中，使用特殊的偏移值表示
-                paramOffsets.put(ps.get(i), -((long) i+1)*8);
+                paramOffsets.put(ps.get(i), -((long) i + 1) * 8);
             } else {
                 // 额外的参数在栈上
                 long offset = 16 + (i - 8) * 8L; // 正数偏移
@@ -446,20 +446,20 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         if (frameSize > 0) {
             // 确保frameSize是16字节对齐的
             long alignedFrameSize = (frameSize + 15) & ~15;
-            System.err.println("genPrologue "+alignedFrameSize);
+            System.err.println("genPrologue " + alignedFrameSize);
             assembly.add(new Directive("\tsub\tsp, sp, #" + alignedFrameSize));
         }
         // 保存被使用的寄存器
         int counter = 1;
-        for (Register register: registers) {
-            assembly.add(new Directive("\tstr\t"+register.name() + ", [x29, #-"+(counter++)*8 + "]"));
+        for (Register register : registers) {
+            assembly.add(new Directive("\tstr\t" + register.name() + ", [x29, #-" + (counter++) * 8 + "]"));
         }
         // 保存参数寄存器到栈上，以便longjmp能够正确恢复
         List<Parameter> ps = currentFunction.parameters();
         for (int i = 0; i < ps.size() && i < 8; i++) {
             String reg = "x" + i;
-            long offset = registerAllocator.getAllocatedRegisterOrderedList().size()*8L;
-            assembly.add(new Directive("\tstr\t" + reg + ", [x29, #-" + ((i + 1) * 8L +offset) + "]"));
+            long offset = registerAllocator.getAllocatedRegisterOrderedList().size() * 8L;
+            assembly.add(new Directive("\tstr\t" + reg + ", [x29, #-" + ((i + 1) * 8L + offset) + "]"));
         }
     }
 
@@ -467,13 +467,14 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         if (frameSize > 0) {
             // 确保frameSize是16字节对齐的
             long alignedFrameSize = (frameSize + 15) & ~15;
-            assembly.add(new Directive("\tadd\tsp, sp, #" + alignedFrameSize));
+//            assembly.add(new Directive("\tadd\tsp, sp, #" + alignedFrameSize));
+            assembly.add(new Directive("\tmov\tsp, x29"));
         }
         // 恢复保存的寄存器
         // todo 需要注意现在的恢复方法不能通过alloca的测试,对吗？
         int counter = 0;
-        for (Register register: registerAllocator.getAllocatedRegisterOrderedList()) {
-            assembly.add(new Directive("\tldr\t"+register.name()+", [x29,-"+(counter+1)*8+"]"));
+        for (Register register : registerAllocator.getAllocatedRegisterOrderedList()) {
+            assembly.add(new Directive("\tldr\t" + register.name() + ", [x29,-" + (counter + 1) * 8 + "]"));
             counter++;
         }
         assembly.add(new Directive("\tldp\tx29, x30, [sp], #16"));
@@ -494,10 +495,14 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         }
 
         // 这里使用sp保存的一个问题在于，如果是调用的alloca，恢复的时候会导致栈破坏
-        assembly.add(new Directive("\tstp\tx9, x10, [sp, #-16]!"));
-        assembly.add(new Directive("\tstp\tx11, x12, [sp, #-16]!"));
-        assembly.add(new Directive("\tstp\tx13, x14, [sp, #-16]!"));
-        assembly.add(new Directive("\tstp\tx15, x16, [sp, #-16]!"));
+        boolean shouldSaveCallerRegister = !e.function().name().equals("alloca");
+        System.err.println("call "+e.function().name());
+        if (shouldSaveCallerRegister) {
+            assembly.add(new Directive("\tstp\tx9, x10, [sp, #-16]!"));
+            assembly.add(new Directive("\tstp\tx11, x12, [sp, #-16]!"));
+            assembly.add(new Directive("\tstp\tx13, x14, [sp, #-16]!"));
+            assembly.add(new Directive("\tstp\tx15, x16, [sp, #-16]!"));
+        }
 
         int stackArgs = Math.max(0, total - ARG_REGS.length);
         int shadow = isVar ? 8 * total : 0;
@@ -566,12 +571,13 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
         if (block > 0)
             assembly.add(new Directive("\tadd\tsp, sp, #" + block));
-
-        // 恢复caller-saved寄存器，使用ldp保持16字节对齐
-        assembly.add(new Directive("\tldp\tx15, x16, [sp], #16"));
-        assembly.add(new Directive("\tldp\tx13, x14, [sp], #16"));
-        assembly.add(new Directive("\tldp\tx11, x12, [sp], #16"));
-        assembly.add(new Directive("\tldp\tx9, x10, [sp], #16"));
+        if (shouldSaveCallerRegister) {
+            // 恢复caller-saved寄存器，使用ldp保持16字节对齐
+            assembly.add(new Directive("\tldp\tx15, x16, [sp], #16"));
+            assembly.add(new Directive("\tldp\tx13, x14, [sp], #16"));
+            assembly.add(new Directive("\tldp\tx11, x12, [sp], #16"));
+            assembly.add(new Directive("\tldp\tx9, x10, [sp], #16"));
+        }
 
         return null;
     }
@@ -1009,9 +1015,8 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     }
 
 
-
     private void evalAddress(Expr e) {
-        evalAddressInto(e, ADR_TMP0 .toString());
+        evalAddressInto(e, ADR_TMP0.toString());
     }
 
     private void evalAddressInto(Expr e, String dst) {
@@ -1213,7 +1218,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         long sz = v.type().size();
         if (registerAllocator.isInRegister(ent)) {
             Register register = registerAllocator.getRegister(ent);
-            assembly.add(new Directive("\tmov\tx0, "+register.name()));
+            assembly.add(new Directive("\tmov\tx0, " + register.name()));
         } else if (localVarOffsets.containsKey(ent)) {
             long off = localVarOffsets.get(ent);
             if (sz == 8) {
