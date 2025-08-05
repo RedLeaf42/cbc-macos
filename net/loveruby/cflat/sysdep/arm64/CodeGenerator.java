@@ -44,23 +44,13 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     private final List<DefinedVariable> staticLocals = new ArrayList<>();
 
     private static final Register ADR_TMP0 = Register.X11; // 地址计算用
-    private static final Register OFFT = Register.X12;
     private static final Register TMP0 = Register.X13;
-    private static final Register CALL_TMP = Register.X16;
 
     // 寄存器分配器
     private RegisterAllocator registerAllocator;
     private Map<Entity, net.loveruby.cflat.asm.Register> registerMap = new HashMap<>();
     private Map<Entity, Long> spillOffsets = new HashMap<>();
 
-    // 定义可用的寄存器池，避免使用x0（函数参数和返回值）
-    private static final net.loveruby.cflat.asm.Register[] CALLEE_SAVED_REGS = {
-            Register.X19, Register.X20, Register.X21, Register.X22, Register.X23, Register.X24, Register.X25,
-            Register.X26
-    };
-    private static final net.loveruby.cflat.asm.Register[] CALLER_SAVED_REGS_FOR_ALLOC = {
-            Register.X9, Register.X10, Register.X11, Register.X12, Register.X13, Register.X14, Register.X15
-    };
 
     public CodeGenerator(net.loveruby.cflat.sysdep.CodeGeneratorOptions opts,
                          net.loveruby.cflat.asm.Type naturalType,
@@ -548,7 +538,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + off + "]"));
             }
         }
-
+        registerAllocator.releaseTempRegister(tempRegister);
         if (e.isStaticCall()) {
             // 对于变长参数函数，我们需要特殊处理va_init调用
             if (e.function().name().equals("va_init")) {
@@ -559,14 +549,17 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         } else {
             // 对于间接函数调用，需要将函数地址加载到不同的寄存器，避免覆盖x0中的参数
             e.expr().accept(this); // callee -> x0
+            tempRegister = registerAllocator.allocateTempRegister();
             assembly.add(new Directive("\tmov\t" + tempRegister + ", x0")); // 将函数地址移动到CALL_TMP
             // 现在需要将第一个参数重新加载到x0
+            // todo 严格来说这里是有语法错误的，这里会导致第一个表达式执行两次
             if (!e.args().isEmpty()) {
                 e.args().get(0).accept(this); // 重新加载第一个参数到x0
             }
             assembly.add(new Directive("\tblr\t" + tempRegister)); // 使用CALL_TMP调用函数
+            registerAllocator.releaseTempRegister(tempRegister);
         }
-        registerAllocator.releaseTempRegister(tempRegister);
+
 
         if (block > 0)
             assembly.add(new Directive("\tadd\tsp, sp, #" + block));
@@ -627,14 +620,15 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         // 1) 先算 RHS，值在 x0
         s.rhs().accept(this);
         Register temp = registerAllocator.allocateTempRegister();
+        Register temp2 = registerAllocator.allocateTempRegister();
         assembly.add(new Directive("\tmov\t" + temp + ", x0")); // 保存值
 
         long sz = s.lhs().type().size(); // 1/2/4/8
         // 生成地址到 x11
         if (s.lhs() instanceof Addr) {
-            addrOfEntityInto(((Addr) s.lhs()).entity(), "x11");
+            addrOfEntityInto(((Addr) s.lhs()).entity(),  temp2.name());
         } else if (s.lhs() instanceof Mem) {
-            evalAddressInto(((Mem) s.lhs()).expr(), "x11");
+            evalAddressInto(((Mem) s.lhs()).expr(), temp2.name());
         } else {
             errorHandler.error("unsupported LHS in Assign");
             return null;
@@ -645,17 +639,18 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         String wsrc = "w" + temp.name().substring(1); // w9
 
         if (sz == 8) {
-            assembly.add(new Directive("\tstr\t" + xsrc + ", [x11]"));
+            assembly.add(new Directive("\tstr\t" + xsrc + ", ["+temp2.name()+"]"));
         } else if (sz == 4) {
-            assembly.add(new Directive("\tstr\t" + wsrc + ", [x11]"));
+            assembly.add(new Directive("\tstr\t" + wsrc + ", ["+temp2.name()+"]"));
         } else if (sz == 2) {
-            assembly.add(new Directive("\tstrh\t" + wsrc + ", [x11]"));
+            assembly.add(new Directive("\tstrh\t" + wsrc + ", ["+temp2.name()+"]"));
         } else if (sz == 1) {
-            assembly.add(new Directive("\tstrb\t" + wsrc + ", [x11]"));
+            assembly.add(new Directive("\tstrb\t" + wsrc + ", ["+temp2.name()+"]"));
         } else {
             errorHandler.error("unsupported store size: " + sz);
         }
         registerAllocator.releaseTempRegister(temp);
+        registerAllocator.releaseTempRegister(temp2);
         return null;
     }
 
@@ -768,9 +763,11 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 assembly.add(new Directive("\tsdiv\tx0, x0, " + TMP0));
                 break;
             case S_MOD:
-                assembly.add(new Directive("\tsdiv\t" + ADR_TMP0 + ", x0, " + TMP0));
-                assembly.add(new Directive("\tmul\t" + ADR_TMP0 + ", " + ADR_TMP0 + ", " + TMP0));
-                assembly.add(new Directive("\tsub\tx0, x0, " + ADR_TMP0));
+                Register tempRegister = registerAllocator.allocateTempRegister();
+                assembly.add(new Directive("\tsdiv\t" + tempRegister + ", x0, " + TMP0));
+                assembly.add(new Directive("\tmul\t" + tempRegister + ", " + tempRegister + ", " + TMP0));
+                assembly.add(new Directive("\tsub\tx0, x0, " + tempRegister));
+                registerAllocator.releaseTempRegister(tempRegister);
                 break;
             case BIT_AND:
                 assembly.add(new Directive("\tand\tx0, x0, " + TMP0));
@@ -827,24 +824,27 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     @Override
     public Void visit(Mem e) {
         // 计算地址到 x11，避免覆盖 x0 里的中间值
-        evalAddressInto(e.expr(), "x11");
+        Register temp = registerAllocator.allocateTempRegister();
+        evalAddressInto(e.expr(), temp.name());
+        String tempRef = "["+temp.name()+"]";
         long sz = e.type().size();
 
         if (sz == 1) {
             // 读 1 字节并做有符号扩展成 64 位
-            assembly.add(new Directive("\tldrb\tw0, [x11]"));
+            assembly.add(new Directive("\tldrb\tw0, "+tempRef));
             assembly.add(new Directive("\tsxtb\tx0, w0"));
         } else if (sz == 2) {
-            assembly.add(new Directive("\tldrh\tw0, [x11]"));
+            assembly.add(new Directive("\tldrh\tw0, "+tempRef));
             assembly.add(new Directive("\tsxth\tx0, w0"));
         } else if (sz == 4) {
-            assembly.add(new Directive("\tldr\tw0, [x11]"));
+            assembly.add(new Directive("\tldr\tw0, "+tempRef));
             assembly.add(new Directive("\tsxtw\tx0, w0"));
         } else if (sz == 8) {
-            assembly.add(new Directive("\tldr\tx0, [x11]"));
+            assembly.add(new Directive("\tldr\tx0, "+tempRef));
         } else {
             errorHandler.error("unsupported load size: " + sz);
         }
+        registerAllocator.releaseTempRegister(temp);
         return null;
     }
 
@@ -1064,51 +1064,52 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 evalAddressInto(b.left(), dst); // base -> dst
                 // 使用临时寄存器计算右边的表达式，避免寄存器冲突
                 b.right().accept(this);
-                assembly.add(new Directive("\tmov\t" + OFFT + ", x0")); // 将右操作数保存到OFFT
                 if (op == Op.ADD)
-                    assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + OFFT));
+                    assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + "x0"));
                 else
-                    assembly.add(new Directive("\tsub\t" + dst + ", " + dst + ", " + OFFT));
+                    assembly.add(new Directive("\tsub\t" + dst + ", " + dst + ", " + "x0"));
                 return;
             }
             // 对于其他操作，使用栈操作避免寄存器冲突
             b.right().accept(this);
             assembly.add(new Directive("\tstr\tx0, [sp, #-16]!")); // 将右操作数压栈
             b.left().accept(this);
-            assembly.add(new Directive("\tldr\t" + OFFT + ", [sp], #16")); // 将右操作数出栈到OFFT
+            Register tempRegister = registerAllocator.allocateTempRegister();
+            assembly.add(new Directive("\tldr\t" + tempRegister + ", [sp], #16")); // 将右操作数出栈到OFFT
 
             switch (op) {
                 case MUL:
-                    assembly.add(new Directive("\tmul\t" + dst + ", x0, " + OFFT));
+                    assembly.add(new Directive("\tmul\t" + dst + ", x0, " + tempRegister));
                     break;
                 case S_DIV:
-                    assembly.add(new Directive("\tsdiv\t" + dst + ", x0, " + OFFT));
+                    assembly.add(new Directive("\tsdiv\t" + dst + ", x0, " + tempRegister));
                     break;
                 case S_MOD:
-                    assembly.add(new Directive("\tsdiv\t" + TMP0 + ", x0, " + OFFT));
-                    assembly.add(new Directive("\tmul\t" + TMP0 + ", " + TMP0 + ", " + OFFT));
-                    assembly.add(new Directive("\tsub\t" + dst + ", x0, " + TMP0));
+                    assembly.add(new Directive("\tsdiv\t" + TMP0 + ", x0, " + tempRegister));
+                    assembly.add(new Directive("\tmul\t" + TMP0 + ", " + TMP0 + ", " + tempRegister));
+                    assembly.add(new Directive("\tsub\t" + dst + ", x0, " + tempRegister));
                     break;
                 case BIT_AND:
-                    assembly.add(new Directive("\tand\t" + dst + ", x0, " + OFFT));
+                    assembly.add(new Directive("\tand\t" + dst + ", x0, " + tempRegister));
                     break;
                 case BIT_OR:
-                    assembly.add(new Directive("\torr\t" + dst + ", x0, " + OFFT));
+                    assembly.add(new Directive("\torr\t" + dst + ", x0, " + tempRegister));
                     break;
                 case BIT_XOR:
-                    assembly.add(new Directive("\teor\t" + dst + ", x0, " + OFFT));
+                    assembly.add(new Directive("\teor\t" + dst + ", x0, " + tempRegister));
                     break;
                 case BIT_LSHIFT:
-                    assembly.add(new Directive("\tlsl\t" + dst + ", x0, " + OFFT));
+                    assembly.add(new Directive("\tlsl\t" + dst + ", x0, " + tempRegister));
                     break;
                 case ARITH_RSHIFT:
-                    assembly.add(new Directive("\tasr\t" + dst + ", x0, " + OFFT));
+                    assembly.add(new Directive("\tasr\t" + dst + ", x0, " + tempRegister));
                     break;
                 default:
                     // 对于比较操作，我们不应该在这里处理地址计算
                     errorHandler.error("unsupported binary operation in address calculation: " + op);
                     break;
             }
+            registerAllocator.releaseTempRegister(tempRegister);
             return;
         }
         // fallback

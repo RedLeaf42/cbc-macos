@@ -39,7 +39,7 @@ public class RegisterAllocator {
     private Set<Register> availableCallerSaved = new LinkedHashSet<>(Arrays.asList(CALLER_SAVED));
 
     // 变量到寄存器的映射
-    private Map<Entity, net.loveruby.cflat.sysdep.arm64.Register> registerMap = new LinkedHashMap<>();
+    private final Map<Entity, net.loveruby.cflat.sysdep.arm64.Register> registerMap = new LinkedHashMap<>();
 
     // 溢出到栈上的变量
     private Map<Entity, Long> spillOffsets = new HashMap<>();
@@ -54,6 +54,8 @@ public class RegisterAllocator {
     /* 设计这个的目的是为了将寄存器分配逻辑完全放到CodeGenerator中，CodeGenerator不再保留任何硬编码代码 */
     private final Register[] totalTempRegisters = {
             Register.X9,
+            Register.X11,
+            Register.X12,
             Register.X16
     };
     private final Set<Register> tempAvaiableRegisterList = new LinkedHashSet<>(Arrays.asList(
@@ -65,6 +67,8 @@ public class RegisterAllocator {
             throw new IllegalStateException("no temp register");
         }
         Register item = tempAvaiableRegisterList.iterator().next();
+        System.err.println("allocate item at "+item.name());
+        (new Throwable()).printStackTrace();;
         tempAvaiableRegisterList.remove(item);
         return item;
     }
@@ -78,6 +82,8 @@ public class RegisterAllocator {
             }
         }
         if (valid) {
+            System.err.println("releaseTempRegister item at "+register.name());
+            (new Throwable()).printStackTrace();;
             tempAvaiableRegisterList.add(register);
         }
     }
