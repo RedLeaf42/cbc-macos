@@ -4,6 +4,7 @@ import net.loveruby.cflat.entity.*;
 import net.loveruby.cflat.ir.*;
 
 import java.util.*;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 /**
@@ -37,6 +38,7 @@ public class RegisterAllocator {
     // 当前可用的寄存器
     private Set<net.loveruby.cflat.sysdep.arm64.Register> availableCalleeSaved = new LinkedHashSet<>(Arrays.asList(CALLEE_SAVED));
     private Set<Register> availableCallerSaved = new LinkedHashSet<>(Arrays.asList(CALLER_SAVED));
+    private Map<DefinedVariable, LocalScope> variableLocalScopeMap = new HashMap<>();
 
     // 变量到寄存器的映射
     private final Map<Entity, net.loveruby.cflat.sysdep.arm64.Register> registerMap = new LinkedHashMap<>();
@@ -69,7 +71,6 @@ public class RegisterAllocator {
         }
         Register item = tempAvaiableRegisterList.iterator().next();
         System.err.println("allocate item at "+item.name());
-        (new Throwable()).printStackTrace();;
         tempAvaiableRegisterList.remove(item);
         return item;
     }
@@ -84,7 +85,6 @@ public class RegisterAllocator {
         }
         if (valid) {
             System.err.println("releaseTempRegister item at "+register.name());
-            (new Throwable()).printStackTrace();;
             tempAvaiableRegisterList.add(register);
         }
     }
@@ -96,8 +96,10 @@ public class RegisterAllocator {
     public void allocateRegisters(DefinedFunction func,
                                   Map<Entity, Long> localVarOffsets,
                                   Map<Entity, Long> paramOffsets,
-                                  List<Variable> globalVariables
+                                  List<Variable> globalVariables,
+                                  LocalScope scope
     ) {
+        variableLocalScopeMap.clear();
         registerMap.clear();
         spillOffsets.clear();
         tempAvaiableRegisterList.clear();
@@ -105,6 +107,7 @@ public class RegisterAllocator {
         List<Stmt> statements = func.ir();
         // 0. 标记始终从内存中获取值的变量
         collectAddressTakenVars(statements);
+        collectVariableToScopeMap(scope);
 
         // 1. 进行活跃变量分析
         analyzeLiveVariables(statements);
@@ -127,6 +130,11 @@ public class RegisterAllocator {
             System.err.println("register: [ " + entity.name() + "], " + register);
         });
         System.err.println("Spilled variables: " + spillOffsets.size());
+    }
+
+    private void collectVariableToScopeMap(LocalScope scope) {
+       scope.allLocalVariables().forEach(definedVariable -> variableLocalScopeMap.put(definedVariable, scope));
+       scope.children().forEach(this::collectVariableToScopeMap);
     }
 
     private void collectAddressTakenVars(List<Stmt> statements) {
@@ -261,54 +269,50 @@ public class RegisterAllocator {
     private void buildLifeRanges(List<Stmt> statements) {
         lifeRanges.clear();
 
-        // 为每个变量找到定义点和最后使用点
+        // 遍历语句，累积 start 和 end
         for (int i = 0; i < statements.size(); i++) {
             Stmt stmt = statements.get(i);
 
-            // 检查变量定义
+            // 定义变量
             for (Entity def : defs(stmt)) {
                 LifeRange range = lifeRanges.get(def);
                 if (range == null) {
-                    range = new LifeRange(def);
+                    range = new LifeRange(def, variableLocalScopeMap.get(def));
                     lifeRanges.put(def, range);
                 }
-                range.startPoint = i;
+                range.startPoint = (range.startPoint == -1) ? i : Math.min(range.startPoint, i);
+                range.endPoint = Math.max(range.endPoint, i);
             }
 
-            // 检查变量使用
+            // 使用变量
             for (Entity use : uses(stmt)) {
                 LifeRange range = lifeRanges.get(use);
                 if (range == null) {
-                    range = new LifeRange(use);
+                    range = new LifeRange(use, variableLocalScopeMap.get(use));
                     lifeRanges.put(use, range);
                 }
-                range.endPoint = i;
+                range.startPoint = (range.startPoint == -1) ? i : Math.min(range.startPoint, i);
+                range.endPoint = Math.max(range.endPoint, i);
             }
         }
 
-        // 检查是否跨越函数调用
+        // 检查跨调用
         for (int i = 0; i < statements.size(); i++) {
             Stmt stmt = statements.get(i);
-            if (stmt instanceof ExprStmt && ((ExprStmt) stmt).expr() instanceof Call) {
-                // 标记跨越函数调用的变量
+            boolean isCallStmt =
+                    (stmt instanceof ExprStmt && ((ExprStmt) stmt).expr() instanceof Call) ||
+                            (stmt instanceof Assign && ((Assign) stmt).rhs() instanceof Call);
+
+            if (isCallStmt) {
                 for (LifeRange range : lifeRanges.values()) {
                     if (range.startPoint <= i && range.endPoint >= i) {
-                        range.crossesCall = true;
-                    }
-                }
-            } else if (stmt instanceof Assign) {
-                Assign assign = (Assign) stmt;
-                if (assign.rhs() instanceof Call) {
-                    // 标记跨越函数调用的变量
-                    for (LifeRange range : lifeRanges.values()) {
-                        if (range.startPoint <= i && range.endPoint >= i) {
-                            range.crossesCall = true;
-                        }
+                        range.crossesCall = true;  // |= true
                     }
                 }
             }
         }
     }
+
 
     public void adjustSpill(
             Map<Entity, Long> paramOffsets,
@@ -333,9 +337,9 @@ public class RegisterAllocator {
         spillOffsets.putAll(paramOffsets);
         sortedRanges.sort((a, b) -> {
             // 优先分配跨越函数调用的变量到callee-saved寄存器
-//            if (a.crossesCall != b.crossesCall) {
-//                return a.crossesCall ? -1 : 1;
-//            }
+            if (a.crossesCall != b.crossesCall) {
+                return a.crossesCall ? -1 : 1;
+            }
             // 其次按生命周期长度排序
             int aLength = a.endPoint - a.startPoint;
             int bLength = b.endPoint - b.startPoint;
@@ -349,7 +353,7 @@ public class RegisterAllocator {
             System.err.println("try allocate for " + range.entity.name() + " range: [" + range.startPoint + "," + range.endPoint + "] " + " paramsOffsets.containKey = " + parameters.contains(range.entity) + " global.containKey = " + globalVariable.contains(range.entity));
             if (needsAddress.contains(range.entity) || parameters.contains(range.entity) || globalVariable.contains(range.entity))
                 continue;
-            Register reg = allocateRegister(range);
+            Register reg = findReusableRegister(range);
             if (reg != null) {
                 registerMap.put(range.entity, reg);
             } else {
@@ -473,16 +477,73 @@ public class RegisterAllocator {
         int startPoint;
         int endPoint;
         boolean crossesCall;
+        LocalScope scope;
 
-        LifeRange(Entity entity) {
+        LifeRange(Entity entity, LocalScope scope) {
             this.entity = entity;
             this.startPoint = -1;
             this.endPoint = -1;
             this.crossesCall = false;
+            this.scope = scope;
         }
 
         public boolean overlaps(LifeRange other) {
             return !(this.endPoint < other.startPoint || other.endPoint < this.startPoint);
         }
     }
+
+    private boolean scopesOverlap(LocalScope a, LocalScope b) {
+        return isAncestor(a, b) || isAncestor(b, a);
+    }
+
+    private boolean isAncestor(Scope ancestor, Scope child) {
+        while (child != null) {
+            if (child == ancestor) return true;
+            child = child.parent();
+        }
+        return false;
+    }
+
+    private Register findReusableRegister(LifeRange newRange) {
+        Set<Register> candidateRegisters = new LinkedHashSet<>();
+
+        // 1. 确定优先的候选寄存器池（caller-saved 或 callee-saved）
+        if (newRange.crossesCall) {
+            candidateRegisters.addAll(Arrays.asList(CALLEE_SAVED));
+            candidateRegisters.addAll(Arrays.asList(CALLER_SAVED));
+        } else {
+            candidateRegisters.addAll(Arrays.asList(CALLER_SAVED));
+            candidateRegisters.addAll(Arrays.asList(CALLEE_SAVED));
+        }
+
+        // 2. 遍历候选寄存器，检查是否可以重用
+        for (Register reg : candidateRegisters) {
+            boolean conflict = false;
+            for (Map.Entry<Entity, Register> entry : registerMap.entrySet()) {
+                Entity existingEntity = entry.getKey();
+                Register existingRegister = entry.getValue();
+
+                if (!existingRegister.equals(reg)) continue;
+
+                LifeRange existingRange = lifeRanges.get(existingEntity);
+
+                // 存在冲突：
+                // (1) 生命周期重叠
+                // (2) 或作用域重叠（嵌套或相交）
+                System.err.println("existingRange: ["+existingRange.startPoint+","+existingRange.endPoint+"]" + " scope: "+ existingRange.scope);
+                System.err.println("newRange: ["+newRange.startPoint+","+newRange.endPoint+"]" + " scope: "+newRange.scope);
+                if (existingRange.overlaps(newRange) || scopesOverlap(existingRange.scope, newRange.scope)) {
+                    conflict = true;
+                    break;
+                }
+            }
+
+            if (!conflict) {
+                return reg;
+            }
+        }
+
+        return null; // 所有寄存器都有冲突，只能溢出
+    }
+
 }

@@ -295,7 +295,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         calcFrameLayout(func);
         // todo 这里对于caller的寄存器可以不保存
         // 重新进行寄存器分配（确保获取最新结果）
-        registerAllocator.allocateRegisters(func, paramOffsets, localVarOffsets, currentIR.allGlobalVariables());
+        registerAllocator.allocateRegisters(func, paramOffsets, localVarOffsets, currentIR.allGlobalVariables(),func.lvarScope());
         long allocatedRegisterSize = registerAllocator.getAllocatedRegisterOrderedList().size() * 8L;
         System.out.println("frameSize original " + frameSize + " registerSize=" + allocatedRegisterSize);
         frameSize += allocatedRegisterSize;
