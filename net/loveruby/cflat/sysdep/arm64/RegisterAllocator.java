@@ -4,7 +4,6 @@ import net.loveruby.cflat.entity.*;
 import net.loveruby.cflat.ir.*;
 
 import java.util.*;
-import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -52,9 +51,37 @@ public class RegisterAllocator {
 
     // 变量生命周期
     private final Map<Entity, LifeRange> lifeRanges = new HashMap<>();
+    /* 设计这个的目的是为了将寄存器分配逻辑完全放到CodeGenerator中，CodeGenerator不再保留任何硬编码代码 */
+    private final Register[] totalTempRegisters = {
+            Register.X9,
+            Register.X16
+    };
+    private final Set<Register> tempAvaiableRegisterList = new LinkedHashSet<>(Arrays.asList(
+            totalTempRegisters
+    ));
 
-    public RegisterAllocator() {
+    public Register allocateTempRegister() {
+        if (tempAvaiableRegisterList.isEmpty()) {
+            throw new IllegalStateException("no temp register");
+        }
+        Register item = tempAvaiableRegisterList.iterator().next();
+        tempAvaiableRegisterList.remove(item);
+        return item;
     }
+
+    public void releaseTempRegister(Register register) {
+        boolean valid = false;
+        for (Register totalTempRegister : totalTempRegisters) {
+            if (totalTempRegister.name().equals(register.name())) {
+                valid = true;
+                break;
+            }
+        }
+        if (valid) {
+            tempAvaiableRegisterList.add(register);
+        }
+    }
+
 
     /**
      * 为函数分配寄存器
@@ -63,9 +90,11 @@ public class RegisterAllocator {
                                   Map<Entity, Long> localVarOffsets,
                                   Map<Entity, Long> paramOffsets,
                                   List<Variable> globalVariables
-                                  ) {
+    ) {
         registerMap.clear();
         spillOffsets.clear();
+        tempAvaiableRegisterList.clear();
+        tempAvaiableRegisterList.addAll(Arrays.asList(totalTempRegisters));
         List<Stmt> statements = func.ir();
         // 0. 标记始终从内存中获取值的变量
         collectAddressTakenVars(statements);
@@ -88,7 +117,7 @@ public class RegisterAllocator {
         System.err.println("Parameters: " + func.parameters().size());
         System.err.println("Allocated registers: " + registerMap.size());
         registerMap.forEach((entity, register) -> {
-           System.err.println("register: [ "+entity.name()+"], "+register);
+            System.err.println("register: [ " + entity.name() + "], " + register);
         });
         System.err.println("Spilled variables: " + spillOffsets.size());
     }
@@ -100,14 +129,14 @@ public class RegisterAllocator {
             stmt.accept(new DefaultIRVisitor<Void, Void>() {
                 @Override
                 public Void visit(Addr e) {
-                    System.err.println("Address entity: "+e.entity().name());
+                    System.err.println("Address entity: " + e.entity().name());
                     needsAddress.add(e.entity());
                     return null;
                 }
 
             });
         }
-        System.err.println("collectAddressTakenVars needsAddress: "+needsAddress.stream().map(Entity::name).collect(Collectors.toList()));
+        System.err.println("collectAddressTakenVars needsAddress: " + needsAddress.stream().map(Entity::name).collect(Collectors.toList()));
     }
 
     /**
@@ -305,13 +334,14 @@ public class RegisterAllocator {
             int bLength = b.endPoint - b.startPoint;
             return Integer.compare(bLength, aLength);
         });
-        System.err.println("paramsOffsets.size = "+paramOffsets.size());
+        System.err.println("paramsOffsets.size = " + paramOffsets.size());
         // 分配寄存器
         for (LifeRange range : sortedRanges) {
             // 如果对其中一个Entity取了地址，那么就不分配寄存器
             // 如果这个Entity是参数，暂时也不分配寄存器,原因是因为这里还没有处理好参数保存到寄存器的逻辑
-            System.err.println("try allocate for "+range.entity.name() + " range: [" +range.startPoint+ ","+range.endPoint+"] " + " paramsOffsets.containKey = "+parameters.contains(range.entity) + " global.containKey = "+globalVariable.contains(range.entity));
-            if (needsAddress.contains(range.entity) || parameters.contains(range.entity) || globalVariable.contains(range.entity)) continue;
+            System.err.println("try allocate for " + range.entity.name() + " range: [" + range.startPoint + "," + range.endPoint + "] " + " paramsOffsets.containKey = " + parameters.contains(range.entity) + " global.containKey = " + globalVariable.contains(range.entity));
+            if (needsAddress.contains(range.entity) || parameters.contains(range.entity) || globalVariable.contains(range.entity))
+                continue;
             Register reg = allocateRegister(range);
             if (reg != null) {
                 registerMap.put(range.entity, reg);

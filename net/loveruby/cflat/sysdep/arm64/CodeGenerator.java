@@ -43,7 +43,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     private final Map<Entity, Long> paramOffsets = new HashMap<>();
     private final List<DefinedVariable> staticLocals = new ArrayList<>();
 
-    private static final Register VAL_TMP = Register.X9; // 仅用于保存值(RHS等)
     private static final Register ADR_TMP0 = Register.X11; // 地址计算用
     private static final Register OFFT = Register.X12;
     private static final Register TMP0 = Register.X13;
@@ -519,24 +518,24 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             args.get(i).accept(this); // x0
             assembly.add(new Directive("\tstr\tx0, [sp, #" + (tempBase + i * 8L) + "]"));
         }
-
+        Register tempRegister = registerAllocator.allocateTempRegister();
         // Pass2: L->R
         for (int i = 0; i < total; ++i) {
             long src = tempBase + i * 8L;
             if (i == 0) {
                 assembly.add(new Directive("\tldr\tx0, [sp, #" + src + "]"));
             } else {
-                assembly.add(new Directive("\tldr\t" + CALL_TMP + ", [sp, #" + src + "]"));
+                assembly.add(new Directive("\tldr\t" + tempRegister + ", [sp, #" + src + "]"));
             }
 
             String dst;
             if (i < ARG_REGS.length) {
                 dst = ARG_REGS[i].toString();
                 if (i != 0) {
-                    assembly.add(new Directive("\tmov\t" + dst + ", " + CALL_TMP));
+                    assembly.add(new Directive("\tmov\t" + dst + ", " + tempRegister));
                 }
             } else {
-                dst = (i == 0) ? "x0" : CALL_TMP.toString();
+                dst = tempRegister.toString();
             }
 
             // 可变参数：把所有可变参数push到shadow区域
@@ -560,13 +559,14 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         } else {
             // 对于间接函数调用，需要将函数地址加载到不同的寄存器，避免覆盖x0中的参数
             e.expr().accept(this); // callee -> x0
-            assembly.add(new Directive("\tmov\t" + CALL_TMP + ", x0")); // 将函数地址移动到CALL_TMP
+            assembly.add(new Directive("\tmov\t" + tempRegister + ", x0")); // 将函数地址移动到CALL_TMP
             // 现在需要将第一个参数重新加载到x0
             if (!e.args().isEmpty()) {
                 e.args().get(0).accept(this); // 重新加载第一个参数到x0
             }
-            assembly.add(new Directive("\tblr\t" + CALL_TMP)); // 使用CALL_TMP调用函数
+            assembly.add(new Directive("\tblr\t" + tempRegister)); // 使用CALL_TMP调用函数
         }
+        registerAllocator.releaseTempRegister(tempRegister);
 
         if (block > 0)
             assembly.add(new Directive("\tadd\tsp, sp, #" + block));
@@ -614,16 +614,20 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
         // 参考x86的实现，使用虚拟栈避免寄存器冲突
         if (s.lhs() instanceof Var) {
+            // 如果寄存器中没有，溢出中也没有计算，那说明这个变量应该是全局变量
             // 对于Var类型的LHS，直接计算RHS并存储
             s.rhs().accept(this);
-            assembly.add(new Directive("\tmov\t" + VAL_TMP + ", x0"));
-            storeToVar((Var) s.lhs(), VAL_TMP);
+            Register temp = registerAllocator.allocateTempRegister();
+            assembly.add(new Directive("\tmov\t" + temp + ", x0"));
+            storeToVar((Var) s.lhs(), temp);
+            registerAllocator.releaseTempRegister(temp);
             return null;
         }
 
         // 1) 先算 RHS，值在 x0
         s.rhs().accept(this);
-        assembly.add(new Directive("\tmov\t" + VAL_TMP + ", x0")); // 保存值
+        Register temp = registerAllocator.allocateTempRegister();
+        assembly.add(new Directive("\tmov\t" + temp + ", x0")); // 保存值
 
         long sz = s.lhs().type().size(); // 1/2/4/8
         // 生成地址到 x11
@@ -637,8 +641,8 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         }
 
         // 根据大小选择指令/寄存器宽度
-        String xsrc = VAL_TMP.toString(); // x9
-        String wsrc = "w" + VAL_TMP.name().substring(1); // w9
+        String xsrc = temp.toString(); // x9
+        String wsrc = "w" + temp.name().substring(1); // w9
 
         if (sz == 8) {
             assembly.add(new Directive("\tstr\t" + xsrc + ", [x11]"));
@@ -651,6 +655,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         } else {
             errorHandler.error("unsupported store size: " + sz);
         }
+        registerAllocator.releaseTempRegister(temp);
         return null;
     }
 
@@ -1013,10 +1018,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         }
     }
 
-
-    private void evalAddress(Expr e) {
-        evalAddressInto(e, ADR_TMP0.toString());
-    }
 
     private void evalAddressInto(Expr e, String dst) {
         if (e instanceof Addr) {
