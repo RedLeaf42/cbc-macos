@@ -56,6 +56,7 @@ public class RegisterAllocator {
             Register.X9,
             Register.X11,
             Register.X12,
+            Register.X13,
             Register.X16
     };
     private final Set<Register> tempAvaiableRegisterList = new LinkedHashSet<>(Arrays.asList(

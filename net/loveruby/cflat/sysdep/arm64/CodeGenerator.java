@@ -3,11 +3,9 @@ package net.loveruby.cflat.sysdep.arm64;
 import net.loveruby.cflat.asm.*;
 import net.loveruby.cflat.entity.*;
 import net.loveruby.cflat.ir.*;
-import net.loveruby.cflat.type.FunctionType;
 import net.loveruby.cflat.utils.ErrorHandler;
 
 import java.util.*;
-import java.util.function.BiConsumer;
 import java.util.stream.Collectors;
 
 /**
@@ -42,10 +40,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     private final Map<Entity, Long> localVarOffsets = new HashMap<>();
     private final Map<Entity, Long> paramOffsets = new HashMap<>();
     private final List<DefinedVariable> staticLocals = new ArrayList<>();
-
-    private static final Register ADR_TMP0 = Register.X11; // 地址计算用
-    private static final Register TMP0 = Register.X13;
-
     // 寄存器分配器
     private RegisterAllocator registerAllocator;
     private Map<Entity, net.loveruby.cflat.asm.Register> registerMap = new HashMap<>();
@@ -339,15 +333,13 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
         // 处理参数
         for (Parameter param : func.parameters()) {
-            Entity entity = param;
-            if (registerAllocator.isInRegister(entity)) {
-                registerMap.put(entity, registerAllocator.getRegister(entity));
-            } else if (registerAllocator.isSpilled(entity)) {
-                spillOffsets.put(entity, registerAllocator.getSpillOffset(entity));
+            if (registerAllocator.isInRegister(param)) {
+                registerMap.put(param, registerAllocator.getRegister(param));
+            } else if (registerAllocator.isSpilled(param)) {
+                spillOffsets.put(param, registerAllocator.getSpillOffset(param));
             }
         }
 
-        Symbol fn = func.callingSymbol();
         // 对于函数定义，我们使用不带@PLT后缀的符号名
         String funcName = func.isPrivate() ? func.name() : "_" + func.name();
 
@@ -398,10 +390,9 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         // 递归分配局部变量空间，允许不同block重叠
         // 从参数保存空间之后开始分配
         LocalScope root = f.lvarScope();
-        long totalLocalSize = allocateLocalVariablesRecursive(root, paramSaveSize);
 
         // 总栈帧大小 = 局部变量大小 + 参数保存空间
-        frameSize = totalLocalSize;
+        frameSize = allocateLocalVariablesRecursive(root, paramSaveSize);
     }
 
     // 递归分配局部变量空间，返回当前及所有子作用域最大所需空间
@@ -412,7 +403,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             if (var.isParameter() || var.isPrivate())
                 continue;
             long alignment = var.type().alignment();
-            len = (len + alignment - 1) & ~(alignment - 1);
+            len = (len + alignment - 1) & -alignment;
             long sz = var.type().allocSize();
             len += sz;
             // 先设置为临时偏移，后面fix
@@ -682,11 +673,13 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         // 条件值现在在 x0 中
         for (Case c : s.cases()) {
             // 将 case 值加载到临时寄存器
-            materializeImmediate64(TMP0.toString(), c.value, false);
+            Register tmp = registerAllocator.allocateTempRegister();
+            materializeImmediate64(tmp.name(), c.value, false);
             // 比较条件值和 case 值
-            assembly.add(new Directive("\tcmp\tx0, " + TMP0));
+            assembly.add(new Directive("\tcmp\tx0, " + tmp));
             // 如果相等，跳转到对应的标签
             assembly.add(new Directive("\tbeq\t" + c.label.symbol().toSource(labelSymbols) + "f"));
+            registerAllocator.releaseTempRegister(tmp);
         }
         // 如果没有匹配的 case，跳转到 default 标签
         assembly.add(new Directive("\tb\t" + s.defaultLabel().symbol().toSource(labelSymbols) + "f"));
@@ -747,71 +740,73 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         e.right().accept(this);
         assembly.add(new Directive("\tstr\tx0, [sp, #-16]!")); // 将右操作数压栈
         e.left().accept(this);
-        assembly.add(new Directive("\tldr\t" + TMP0 + ", [sp], #16")); // 将右操作数出栈到TMP0
+        Register tmp0 = registerAllocator.allocateTempRegister();
+        assembly.add(new Directive("\tldr\t" + tmp0 + ", [sp], #16")); // 将右操作数出栈到TMP0
 
         switch (e.op()) {
             case ADD:
-                assembly.add(new Directive("\tadd\tx0, x0, " + TMP0));
+                assembly.add(new Directive("\tadd\tx0, x0, " + tmp0));
                 break;
             case SUB:
-                assembly.add(new Directive("\tsub\tx0, x0, " + TMP0));
+                assembly.add(new Directive("\tsub\tx0, x0, " + tmp0));
                 break;
             case MUL:
-                assembly.add(new Directive("\tmul\tx0, x0, " + TMP0));
+                assembly.add(new Directive("\tmul\tx0, x0, " + tmp0));
                 break;
             case S_DIV:
-                assembly.add(new Directive("\tsdiv\tx0, x0, " + TMP0));
+                assembly.add(new Directive("\tsdiv\tx0, x0, " + tmp0));
                 break;
             case S_MOD:
                 Register tempRegister = registerAllocator.allocateTempRegister();
-                assembly.add(new Directive("\tsdiv\t" + tempRegister + ", x0, " + TMP0));
-                assembly.add(new Directive("\tmul\t" + tempRegister + ", " + tempRegister + ", " + TMP0));
+                assembly.add(new Directive("\tsdiv\t" + tempRegister + ", x0, " + tmp0));
+                assembly.add(new Directive("\tmul\t" + tempRegister + ", " + tempRegister + ", " + tmp0));
                 assembly.add(new Directive("\tsub\tx0, x0, " + tempRegister));
                 registerAllocator.releaseTempRegister(tempRegister);
                 break;
             case BIT_AND:
-                assembly.add(new Directive("\tand\tx0, x0, " + TMP0));
+                assembly.add(new Directive("\tand\tx0, x0, " + tmp0));
                 break;
             case BIT_OR:
-                assembly.add(new Directive("\torr\tx0, x0, " + TMP0));
+                assembly.add(new Directive("\torr\tx0, x0, " + tmp0));
                 break;
             case BIT_XOR:
-                assembly.add(new Directive("\teor\tx0, x0, " + TMP0));
+                assembly.add(new Directive("\teor\tx0, x0, " + tmp0));
                 break;
             case BIT_LSHIFT:
-                assembly.add(new Directive("\tlsl\tx0, x0, " + TMP0));
+                assembly.add(new Directive("\tlsl\tx0, x0, " + tmp0));
                 break;
             case ARITH_RSHIFT:
-                assembly.add(new Directive("\tasr\tx0, x0, " + TMP0));
+                assembly.add(new Directive("\tasr\tx0, x0, " + tmp0));
                 break;
             case EQ:
-                assembly.add(new Directive("\tcmp\tx0, " + TMP0));
+                assembly.add(new Directive("\tcmp\tx0, " + tmp0));
                 assembly.add(new Directive("\tcset\tx0, eq"));
                 break;
             case NEQ:
-                assembly.add(new Directive("\tcmp\tx0, " + TMP0));
+                assembly.add(new Directive("\tcmp\tx0, " + tmp0));
                 assembly.add(new Directive("\tcset\tx0, ne"));
                 break;
             case S_LT:
-                assembly.add(new Directive("\tcmp\tx0, " + TMP0));
+                assembly.add(new Directive("\tcmp\tx0, " + tmp0));
                 assembly.add(new Directive("\tcset\tx0, lt"));
                 break;
             case S_LTEQ:
-                assembly.add(new Directive("\tcmp\tx0, " + TMP0));
+                assembly.add(new Directive("\tcmp\tx0, " + tmp0));
                 assembly.add(new Directive("\tcset\tx0, le"));
                 break;
             case S_GT:
-                assembly.add(new Directive("\tcmp\tx0, " + TMP0));
+                assembly.add(new Directive("\tcmp\tx0, " + tmp0));
                 assembly.add(new Directive("\tcset\tx0, gt"));
                 break;
             case S_GTEQ:
-                assembly.add(new Directive("\tcmp\tx0, " + TMP0));
+                assembly.add(new Directive("\tcmp\tx0, " + tmp0));
                 assembly.add(new Directive("\tcset\tx0, ge"));
                 break;
             default:
                 // 保持x0不变
                 break;
         }
+        registerAllocator.releaseTempRegister(tmp0);
         return null;
     }
 
@@ -1075,6 +1070,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             assembly.add(new Directive("\tstr\tx0, [sp, #-16]!")); // 将右操作数压栈
             b.left().accept(this);
             Register tempRegister = registerAllocator.allocateTempRegister();
+            Register tempRegister2 = registerAllocator.allocateTempRegister();
             assembly.add(new Directive("\tldr\t" + tempRegister + ", [sp], #16")); // 将右操作数出栈到OFFT
 
             switch (op) {
@@ -1085,8 +1081,8 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                     assembly.add(new Directive("\tsdiv\t" + dst + ", x0, " + tempRegister));
                     break;
                 case S_MOD:
-                    assembly.add(new Directive("\tsdiv\t" + TMP0 + ", x0, " + tempRegister));
-                    assembly.add(new Directive("\tmul\t" + TMP0 + ", " + TMP0 + ", " + tempRegister));
+                    assembly.add(new Directive("\tsdiv\t" + tempRegister2 + ", x0, " + tempRegister));
+                    assembly.add(new Directive("\tmul\t" + tempRegister2 + ", " + tempRegister2 + ", " + tempRegister));
                     assembly.add(new Directive("\tsub\t" + dst + ", x0, " + tempRegister));
                     break;
                 case BIT_AND:
@@ -1110,6 +1106,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                     break;
             }
             registerAllocator.releaseTempRegister(tempRegister);
+            registerAllocator.releaseTempRegister(tempRegister2);
             return;
         }
         // fallback
@@ -1456,56 +1453,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             assembly.add(new Directive("\tstr\t" + srcReg + ", [" + addrReg + "]"));
         }
     }
-
-    private void loadSized(String addrReg, String dstReg, long size, boolean signExtend) {
-        if (size == 1) {
-            assembly.add(new Directive("\tldrb\tw0, [" + addrReg + "]"));
-            if (signExtend)
-                assembly.add(new Directive("\tsxtb\t" + dstReg + ", w0"));
-            else
-                assembly.add(new Directive("\tuxtb\t" + dstReg + ", w0"));
-        } else if (size == 4) {
-            assembly.add(new Directive("\tldr\tw0, [" + addrReg + "]"));
-            if (signExtend)
-                assembly.add(new Directive("\tsxtw\t" + dstReg + ", w0"));
-            else
-                assembly.add(new Directive("\tuxtw\t" + dstReg + ", w0"));
-        } else {
-            assembly.add(new Directive("\tldr\t" + dstReg + ", [" + addrReg + "]"));
-        }
-    }
-
-    /**
-     * 判断符号是否在当前目标文件内可直接解析：
-     * 1. private（static）一定在当前文件；
-     * 2. currentIR 里显式出现的全局变量或函数视为"本地定义"。
-     */
-    /**
-     * 保存caller-saved寄存器中的变量
-     */
-    private void saveCallerSavedRegisters() {
-        // 暂时禁用寄存器保存，避免栈操作错误
-        // TODO: 实现正确的寄存器保存逻辑
-    }
-
-    /**
-     * 恢复caller-saved寄存器中的变量
-     */
-    private void restoreCallerSavedRegisters() {
-        // 暂时禁用寄存器恢复，避免栈操作错误
-        // TODO: 实现正确的寄存器恢复逻辑
-    }
-
-    /**
-     * 检查寄存器是否是caller-saved
-     */
-    private boolean isCallerSaved(net.loveruby.cflat.asm.Register reg) {
-        String regName = reg.toString();
-        return regName.equals("x9") || regName.equals("x10") || regName.equals("x11") ||
-                regName.equals("x12") || regName.equals("x13") || regName.equals("x14") ||
-                regName.equals("x15");
-    }
-
     private boolean isDefinedHere(Entity ent) {
         if (ent.isPrivate())
             return true;
