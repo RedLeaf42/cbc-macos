@@ -1,6 +1,5 @@
 package net.loveruby.cflat.sysdep.arm64;
 
-import net.loveruby.cflat.asm.Type;
 import net.loveruby.cflat.asm.SymbolTable;
 
 public class Register extends net.loveruby.cflat.asm.Register {
@@ -49,6 +48,10 @@ public class Register extends net.loveruby.cflat.asm.Register {
 
     public boolean isAllocatable() {
         return isAllocatable;
+    }
+
+    public String bit32Name() {
+       return "w"+ name.substring(1);
     }
 
     // ARM64 general purpose registers

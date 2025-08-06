@@ -29,7 +29,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             Register.X4, Register.X5, Register.X6, Register.X7
     };
 
-
     private final SymbolTable constSymbols = new SymbolTable(".LC");
     private final SymbolTable labelSymbols = new SymbolTable("L");
 
@@ -37,6 +36,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     private DefinedFunction currentFunction;
     private IR currentIR; // 当前编译单元的IR
     private long frameSize; // size we sub after pushing FP/LR
+    private long spillOffset;
     private final Map<Entity, Long> localVarOffsets = new HashMap<>();
     private final Map<Entity, Long> paramOffsets = new HashMap<>();
     private final List<DefinedVariable> staticLocals = new ArrayList<>();
@@ -45,10 +45,9 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     private Map<Entity, net.loveruby.cflat.asm.Register> registerMap = new HashMap<>();
     private Map<Entity, Long> spillOffsets = new HashMap<>();
 
-
     public CodeGenerator(net.loveruby.cflat.sysdep.CodeGeneratorOptions opts,
-                         net.loveruby.cflat.asm.Type naturalType,
-                         ErrorHandler h) {
+            net.loveruby.cflat.asm.Type naturalType,
+            ErrorHandler h) {
         this.options = opts;
         this.naturalType = naturalType;
         this.errorHandler = h;
@@ -60,7 +59,8 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     @Override
     public AssemblyCode generate(IR ir) {
         currentIR = ir; // 保存当前IR的引用
-        System.err.println("generate: " + ir.allGlobalVariables().stream().map((java.util.function.Function<Variable, Object>) Entity::name).collect(Collectors.toList()));
+        System.err.println("generate: " + ir.allGlobalVariables().stream()
+                .map((java.util.function.Function<Variable, Object>) Entity::name).collect(Collectors.toList()));
         collectStaticLocals(ir);
         locateSymbols(ir);
         // 为静态变量设置符号引用
@@ -284,6 +284,23 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         }
     }
 
+    /**
+     *
+     * 栈区设计
+     * -----
+     * 超过8个参数在栈上
+     * -----
+     * x29
+     * -----
+     * x30
+     * ----
+     * callee寄存器使用保存
+     * ----
+     * 局部变量区
+     * ----
+     * 寄存器临时spill区域,当使用临时寄存器不够的时候就spill到这个区域
+     *
+     */
     private void generateFunction(DefinedFunction func) {
         currentFunction = func;
         localVarOffsets.clear();
@@ -293,12 +310,14 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         registerMap.clear();
         spillOffsets.clear();
         calcFrameLayout(func);
-        // todo 这里对于caller的寄存器可以不保存
         // 重新进行寄存器分配（确保获取最新结果）
-        registerAllocator.allocateRegisters(func, paramOffsets, localVarOffsets, currentIR.allGlobalVariables(),func.lvarScope());
+        registerAllocator.allocateRegisters(func, paramOffsets, localVarOffsets, currentIR.allGlobalVariables(),
+                func.lvarScope());
         long allocatedRegisterSize = registerAllocator.getAllocatedRegisterOrderedList().size() * 8L;
         System.out.println("frameSize original " + frameSize + " registerSize=" + allocatedRegisterSize);
         frameSize += allocatedRegisterSize;
+        spillOffset = frameSize;
+        // frameSize += spillOffset;
         /*
          * 调整偏移量
          * 对于params offset只需要调整负数的部分
@@ -447,7 +466,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         if (frameSize > 0) {
             // 确保frameSize是16字节对齐的
             long alignedFrameSize = (frameSize + 15) & ~15;
-//            assembly.add(new Directive("\tadd\tsp, sp, #" + alignedFrameSize));
+            // assembly.add(new Directive("\tadd\tsp, sp, #" + alignedFrameSize));
             assembly.add(new Directive("\tmov\tsp, x29"));
         }
         // 恢复保存的寄存器
@@ -551,7 +570,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             registerAllocator.releaseTempRegister(tempRegister);
         }
 
-
         if (block > 0)
             assembly.add(new Directive("\tadd\tsp, sp, #" + block));
         if (shouldSaveCallerRegister) {
@@ -587,11 +605,28 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 }
                 return null;
             } else if (spillOffsets.containsKey(ent)) {
-                // 变量溢出到栈上，计算RHS后存储
+                // 变量溢出到栈上，计算RHS后存储 - 根据变量类型使用正确的存储指令
                 System.err.println("Storing to " + ent.name() + " in spill offset " + spillOffsets.get(ent));
                 s.rhs().accept(this);
                 long offset = spillOffsets.get(ent);
-                assembly.add(new Directive("\tstr\tx0, [x29, #" + offset + "]"));
+
+                // 根据变量类型使用正确的存储指令，避免统一使用64位指令导致的数据覆盖问题
+                long sz = s.lhs().type().size();
+                if (sz == 8) {
+                    // 64位变量：直接使用64位存储指令
+                    assembly.add(new Directive("\tstr\tx0, [x29, #" + offset + "]"));
+                } else if (sz == 4) {
+                    // 32位变量：使用32位存储指令
+                    assembly.add(new Directive("\tstr\tw0, [x29, #" + offset + "]"));
+                } else if (sz == 2) {
+                    // 16位变量：使用16位存储指令
+                    assembly.add(new Directive("\tstrh\tw0, [x29, #" + offset + "]"));
+                } else if (sz == 1) {
+                    // 8位变量：使用8位存储指令
+                    assembly.add(new Directive("\tstrb\tw0, [x29, #" + offset + "]"));
+                } else {
+                    errorHandler.error("unsupported store size: " + sz);
+                }
                 return null;
             }
         }
@@ -617,7 +652,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         long sz = s.lhs().type().size(); // 1/2/4/8
         // 生成地址到 x11
         if (s.lhs() instanceof Addr) {
-            addrOfEntityInto(((Addr) s.lhs()).entity(),  temp2.name());
+            addrOfEntityInto(((Addr) s.lhs()).entity(), temp2.name());
         } else if (s.lhs() instanceof Mem) {
             evalAddressInto(((Mem) s.lhs()).expr(), temp2.name());
         } else {
@@ -630,13 +665,13 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         String wsrc = "w" + temp.name().substring(1); // w9
 
         if (sz == 8) {
-            assembly.add(new Directive("\tstr\t" + xsrc + ", ["+temp2.name()+"]"));
+            assembly.add(new Directive("\tstr\t" + xsrc + ", [" + temp2.name() + "]"));
         } else if (sz == 4) {
-            assembly.add(new Directive("\tstr\t" + wsrc + ", ["+temp2.name()+"]"));
+            assembly.add(new Directive("\tstr\t" + wsrc + ", [" + temp2.name() + "]"));
         } else if (sz == 2) {
-            assembly.add(new Directive("\tstrh\t" + wsrc + ", ["+temp2.name()+"]"));
+            assembly.add(new Directive("\tstrh\t" + wsrc + ", [" + temp2.name() + "]"));
         } else if (sz == 1) {
-            assembly.add(new Directive("\tstrb\t" + wsrc + ", ["+temp2.name()+"]"));
+            assembly.add(new Directive("\tstrb\t" + wsrc + ", [" + temp2.name() + "]"));
         } else {
             errorHandler.error("unsupported store size: " + sz);
         }
@@ -821,21 +856,21 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         // 计算地址到 x11，避免覆盖 x0 里的中间值
         Register temp = registerAllocator.allocateTempRegister();
         evalAddressInto(e.expr(), temp.name());
-        String tempRef = "["+temp.name()+"]";
+        String tempRef = "[" + temp.name() + "]";
         long sz = e.type().size();
 
         if (sz == 1) {
             // 读 1 字节并做有符号扩展成 64 位
-            assembly.add(new Directive("\tldrb\tw0, "+tempRef));
+            assembly.add(new Directive("\tldrb\tw0, " + tempRef));
             assembly.add(new Directive("\tsxtb\tx0, w0"));
         } else if (sz == 2) {
-            assembly.add(new Directive("\tldrh\tw0, "+tempRef));
+            assembly.add(new Directive("\tldrh\tw0, " + tempRef));
             assembly.add(new Directive("\tsxth\tx0, w0"));
         } else if (sz == 4) {
-            assembly.add(new Directive("\tldr\tw0, "+tempRef));
+            assembly.add(new Directive("\tldr\tw0, " + tempRef));
             assembly.add(new Directive("\tsxtw\tx0, w0"));
         } else if (sz == 8) {
-            assembly.add(new Directive("\tldr\tx0, "+tempRef));
+            assembly.add(new Directive("\tldr\tx0, " + tempRef));
         } else {
             errorHandler.error("unsupported load size: " + sz);
         }
@@ -853,10 +888,30 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             System.err.println("Loading " + ent.name() + " from register " + reg);
             assembly.add(new Directive("\tmov\tx0, " + reg));
         } else if (spillOffsets.containsKey(ent)) {
-            // 变量溢出到栈上，从栈加载
+            // 变量溢出到栈上，从栈加载 - 根据变量类型使用正确的加载指令
             long offset = spillOffsets.get(ent);
             System.err.println("Loading " + ent.name() + " from spill offset " + offset);
-            assembly.add(new Directive("\tldr\tx0, [x29, #" + offset + "]"));
+
+            // 根据变量类型使用正确的加载指令，避免统一使用64位指令导致的数据覆盖问题
+            long sz = e.type().size();
+            if (sz == 8) {
+                // 64位变量：直接使用64位加载指令
+                assembly.add(new Directive("\tldr\tx0, [x29, #" + offset + "]"));
+            } else if (sz == 4) {
+                // 32位变量：使用32位加载指令，然后有符号扩展到64位
+                assembly.add(new Directive("\tldr\tw0, [x29, #" + offset + "]"));
+                assembly.add(new Directive("\tsxtw\tx0, w0"));
+            } else if (sz == 2) {
+                // 16位变量：使用16位加载指令，然后有符号扩展到64位
+                assembly.add(new Directive("\tldrh\tw0, [x29, #" + offset + "]"));
+                assembly.add(new Directive("\tsxth\tx0, w0"));
+            } else if (sz == 1) {
+                // 8位变量：使用8位加载指令，然后有符号扩展到64位
+                assembly.add(new Directive("\tldrb\tw0, [x29, #" + offset + "]"));
+                assembly.add(new Directive("\tsxtb\tx0, w0"));
+            } else {
+                errorHandler.error("unsupported load size: " + sz);
+            }
         } else {
             // 使用原有的栈访问方法
             System.err.println("Loading " + ent.name() + " from stack");
@@ -1012,7 +1067,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             }
         }
     }
-
 
     private void evalAddressInto(Expr e, String dst) {
         if (e instanceof Addr) {
@@ -1453,6 +1507,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             assembly.add(new Directive("\tstr\t" + srcReg + ", [" + addrReg + "]"));
         }
     }
+
     private boolean isDefinedHere(Entity ent) {
         if (ent.isPrivate())
             return true;
