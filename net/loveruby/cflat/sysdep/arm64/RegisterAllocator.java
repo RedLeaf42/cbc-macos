@@ -28,8 +28,8 @@ public class RegisterAllocator {
     private static final Register[] CALLER_SAVED = {
             net.loveruby.cflat.sysdep.arm64.Register.X9,
             net.loveruby.cflat.sysdep.arm64.Register.X10,
-             net.loveruby.cflat.sysdep.arm64.Register.X11,
-             net.loveruby.cflat.sysdep.arm64.Register.X12,
+            net.loveruby.cflat.sysdep.arm64.Register.X11,
+            net.loveruby.cflat.sysdep.arm64.Register.X12,
             // net.loveruby.cflat.sysdep.arm64.Register.X13,
             net.loveruby.cflat.sysdep.arm64.Register.X14,
             net.loveruby.cflat.sysdep.arm64.Register.X15
@@ -72,6 +72,10 @@ public class RegisterAllocator {
     private final Map<Register, Long> tempSpillOffsets = new HashMap<>();
     private long nextTempSpillOffset = 0; // 从0开始，每次+8，相对于spillOffset
 
+    // 支持重复spill的栈管理系统
+    private final Map<Register, Stack<Long>> registerSpillStack = new HashMap<>();
+    private long nextSpillOffset = -8L; // 从-8开始，每次-8，用于变量spill
+
     public int getSpillSlotCount() {
         return spillSlotCount;
     }
@@ -111,24 +115,38 @@ public class RegisterAllocator {
     }
 
     /**
-     * 记录寄存器溢出状态
+     * 记录寄存器溢出状态（支持重复spill）
      */
     public void recordSpill(Register reg, long offset) {
+        // 将偏移量压入该寄存器的spill栈
+        registerSpillStack.computeIfAbsent(reg, k -> new Stack<>()).push(offset);
         tempSpillOffsets.put(reg, offset);
+        System.err.println(
+                "Recorded spill for " + reg.name() + " at offset " + offset + " (depth: " + getSpillDepth(reg) + ")");
     }
 
     /**
-     * 获取寄存器的溢出偏移量
+     * 获取寄存器的溢出偏移量（最新的）
      */
     public Long getSpillOffset(Register reg) {
         return tempSpillOffsets.get(reg);
     }
 
     /**
-     * 清理寄存器的溢出状态
+     * 清理寄存器的溢出状态（弹出栈顶）
      */
     public void clearSpill(Register reg) {
-        tempSpillOffsets.remove(reg);
+        Long poppedOffset = popRegisterSpillStack(reg);
+        if (poppedOffset != null) {
+            // 更新最新的spill偏移量
+            Stack<Long> stack = registerSpillStack.get(reg);
+            if (stack != null && !stack.isEmpty()) {
+                tempSpillOffsets.put(reg, stack.peek());
+            } else {
+                tempSpillOffsets.remove(reg);
+            }
+            System.err.println("Cleared spill for " + reg.name() + " (popped offset: " + poppedOffset + ")");
+        }
     }
 
     public void releaseTempRegister(Register register) {
@@ -520,11 +538,76 @@ public class RegisterAllocator {
     /**
      * 将变量溢出到栈上
      */
+    /**
+     * 将变量溢出到栈上（支持重复spill）
+     */
     private void spillToStack(Entity entity) {
-        // 计算溢出偏移量
-//        long offset = -(spillOffsets.size() + 1) * 8L;
-//        spillOffsets.put(entity, offset);
-//        System.err.println("Spilled " + entity.name() + " to offset " + offset);
+        // 获取当前分配给该实体的寄存器
+        Register reg = registerMap.get(entity);
+        if (reg == null) {
+            // 如果没有分配寄存器，使用简单的偏移量计算
+            long offset = nextSpillOffset;
+            nextSpillOffset -= 8L;
+            spillOffsets.put(entity, offset);
+            System.err.println("Spilled " + entity.name() + " to offset " + offset);
+            return;
+        }
+
+        // 支持重复spill：将寄存器内容压入栈
+        long offset = nextSpillOffset;
+        nextSpillOffset -= 8L;
+
+        // 初始化该寄存器的spill栈（如果不存在）
+        registerSpillStack.computeIfAbsent(reg, k -> new Stack<>()).push(offset);
+
+        // 记录最新的spill偏移量
+        spillOffsets.put(entity, offset);
+
+        System.err.println("Spilled " + entity.name() + " (register " + reg.name() + ") to offset " + offset);
+    }
+
+    /**
+     * 获取寄存器的spill栈（支持重复spill）
+     */
+    public Stack<Long> getRegisterSpillStack(Register reg) {
+        return registerSpillStack.get(reg);
+    }
+
+    /**
+     * 获取寄存器最新的spill偏移量
+     */
+    public Long getLatestSpillOffset(Register reg) {
+        Stack<Long> stack = registerSpillStack.get(reg);
+        return stack != null && !stack.isEmpty() ? stack.peek() : null;
+    }
+
+    /**
+     * 弹出寄存器的spill栈（恢复寄存器内容）
+     */
+    public Long popRegisterSpillStack(Register reg) {
+        Stack<Long> stack = registerSpillStack.get(reg);
+        if (stack != null && !stack.isEmpty()) {
+            Long offset = stack.pop();
+            System.err.println("Popped spill offset " + offset + " for register " + reg.name());
+            return offset;
+        }
+        return null;
+    }
+
+    /**
+     * 检查寄存器是否有spill历史
+     */
+    public boolean hasSpillHistory(Register reg) {
+        Stack<Long> stack = registerSpillStack.get(reg);
+        return stack != null && !stack.isEmpty();
+    }
+
+    /**
+     * 获取寄存器的spill深度
+     */
+    public int getSpillDepth(Register reg) {
+        Stack<Long> stack = registerSpillStack.get(reg);
+        return stack != null ? stack.size() : 0;
     }
 
     /**

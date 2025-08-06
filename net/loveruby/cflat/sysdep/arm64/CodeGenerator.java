@@ -774,10 +774,12 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     public Void visit(Bin e) {
         // 参考x86的实现，使用栈来避免寄存器冲突
         e.right().accept(this);
-        assembly.add(new Directive("\tstr\tx0, [sp, #-16]!")); // 将右操作数压栈
-        e.left().accept(this);
         Register tmp0 = allocateTempRegisterWithSpill();
-        assembly.add(new Directive("\tldr\t" + tmp0 + ", [sp], #16")); // 将右操作数出栈到TMP0
+        // assembly.add(new Directive("\tstr\tx0, [sp, #-16]!")); // 将右操作数压栈
+        assembly.add(new Directive("\tmov\t" + tmp0.name() + ", x0"));
+        e.left().accept(this);
+        // assembly.add(new Directive("\tldr\t" + tmp0 + ", [sp], #16")); //
+        // 将右操作数出栈到TMP0
 
         switch (e.op()) {
             case ADD:
@@ -1532,7 +1534,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     }
 
     /**
-     * 分配临时寄存器，如果池为空则处理溢出
+     * 分配临时寄存器，如果池为空则处理溢出（支持重复spill）
      */
     private Register allocateTempRegisterWithSpill() {
         Register reg = registerAllocator.allocateTempRegister();
@@ -1543,37 +1545,60 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
             // 临时寄存器溢出使用相对于sp的偏移量，指向栈帧底部
             // 栈帧布局：[sp] -> [局部变量] -> [临时寄存器溢出] -> [寄存器保存] -> [参数]
-            long absoluteOffset = spillOffset+relativeOffset; // 相对于sp的偏移量
-            System.err.println("allocateTempRegisterWithSpill "+spilledReg.name() + " to "+absoluteOffset);
-            // 生成溢出代码：保存寄存器内容到栈
-            assembly.add(new Directive("\tstr\t" + spilledReg + ", [x29, #-" + absoluteOffset + "]"));
+            long absoluteOffset = spillOffset + relativeOffset; // 相对于sp的偏移量
 
-            // 记录溢出状态（使用相对偏移量）
+            // 检查寄存器是否已经被spill过
+            int spillDepth = registerAllocator.getSpillDepth(spilledReg);
+            System.err.println("allocateTempRegisterWithSpill " + spilledReg.name() + " to " + absoluteOffset
+                    + " (spill depth: " + spillDepth + ")");
+
+            // 生成溢出代码：保存寄存器内容到栈
+            // 如果偏移量超过ARM64的限制，使用基址寄存器+偏移量的方式
+            if (absoluteOffset > 255) {
+                // 使用sp作为基址寄存器，偏移量相对于sp
+                assembly.add(new Directive("\tstr\t" + spilledReg + ", [sp, #" + relativeOffset + "]"));
+            } else {
+                // 使用x29作为基址寄存器，偏移量相对于x29
+                assembly.add(new Directive("\tstr\t" + spilledReg + ", [x29, #-" + absoluteOffset + "]"));
+            }
+
+            // 记录溢出状态（使用相对偏移量，支持重复spill）
             registerAllocator.recordSpill(spilledReg, relativeOffset);
 
             // 重新分配这个寄存器
             reg = spilledReg;
         } else {
-            System.err.println("allocateTempRegisterWithSpill "+reg.name());
+            System.err.println("allocateTempRegisterWithSpill " + reg.name());
         }
         return reg;
     }
 
     /**
-     * 释放临时寄存器，如果被溢出则恢复
+     * 释放临时寄存器，如果被溢出则恢复（支持重复spill）
      */
     private void releaseTempRegisterWithRestore(Register register) {
         // 检查这个寄存器是否被溢出
         Long relativeOffset = registerAllocator.getSpillOffset(register);
         if (relativeOffset != null) {
             // 临时寄存器溢出使用相对于sp的偏移量
-            long absoluteOffset = spillOffset+relativeOffset; // 相对于sp的偏移量
+            long absoluteOffset = spillOffset + relativeOffset; // 相对于sp的偏移量
+
+            // 获取spill深度信息
+            int spillDepth = registerAllocator.getSpillDepth(register);
+            System.err.println("releaseTempRegisterWithRestore " + register.name() + " from " + absoluteOffset
+                    + " (spill depth: " + spillDepth + ")");
 
             // 生成恢复代码：从栈上恢复寄存器内容
-            assembly.add(new Directive("\tldr\t" + register + ", [x29, #-" + absoluteOffset + "]"));
-            System.err.println("releaseTempRegisterWithRestore "+register.name() + " to "+absoluteOffset);
+            // 如果偏移量超过ARM64的限制，使用基址寄存器+偏移量的方式
+            if (absoluteOffset > 255) {
+                // 使用sp作为基址寄存器，偏移量相对于sp
+                assembly.add(new Directive("\tldr\t" + register + ", [sp, #" + relativeOffset + "]"));
+            } else {
+                // 使用x29作为基址寄存器，偏移量相对于x29
+                assembly.add(new Directive("\tldr\t" + register + ", [x29, #-" + absoluteOffset + "]"));
+            }
 
-            // 清理溢出状态
+            // 清理溢出状态（弹出栈顶）
             registerAllocator.clearSpill(register);
         }
 
