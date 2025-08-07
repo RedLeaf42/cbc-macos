@@ -521,10 +521,14 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
         // Pass1: L->R
         for (int i = 0; i < total; ++i) {
+            System.err.println("visit(Call) - Pass1, arg " + i + " before accept");
             args.get(i).accept(this); // x0
+            System.err.println("visit(Call) - Pass1, arg " + i + " after accept");
             assembly.add(new Directive("\tstr\tx0, [sp, #" + (tempBase + i * 8L) + "]"));
         }
+        System.err.println("visit(Call) - Pass1 complete, before allocateTempRegisterWithSpill");
         Register tempRegister = allocateTempRegisterWithSpill();
+        System.err.println("visit(Call) - allocated tempRegister: " + tempRegister.name());
         // Pass2: L->R
         for (int i = 0; i < total; ++i) {
             long src = tempBase + i * 8L;
@@ -774,11 +778,15 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
     @Override
     public Void visit(Bin e) {
+        System.err.println("visit(Bin) - op: " + e.op() + ", before right()");
         // 使用临时寄存器避免寄存器冲突
         e.right().accept(this);
+        System.err.println("visit(Bin) - after right(), before allocateTempRegisterWithSpill");
         Register tmp0 = allocateTempRegisterWithSpill();
+        System.err.println("visit(Bin) - allocated tmp0: " + tmp0.name());
         assembly.add(new Directive("\tmov\t" + tmp0.name() + ", x0"));
 
+        System.err.println("visit(Bin) - before left()");
         e.left().accept(this);
 
         switch (e.op()) {
@@ -844,7 +852,9 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 // 保持x0不变
                 break;
         }
+        System.err.println("visit(Bin) - before releaseTempRegisterWithRestore tmp0: " + tmp0.name());
         releaseTempRegisterWithRestore(tmp0);
+        System.err.println("visit(Bin) - after releaseTempRegisterWithRestore");
         return null;
     }
 
@@ -1544,6 +1554,11 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     private Register allocateTempRegisterWithSpill() {
         Register reg = registerAllocator.allocateTempRegister();
         if (reg == null) {
+            System.err.println("=== TEMP REGISTER EXHAUSTED ===");
+            System.err.println("Current allocated registers: " + registerAllocator.getAllocatedRegisters());
+            System.err.println("Spill slot count: " + registerAllocator.getSpillSlotCount());
+            // 打印调用栈
+            (new Throwable()).printStackTrace();
             // 需要溢出，获取需要溢出的寄存器
             Register spilledReg = registerAllocator.getRegisterToSpill();
             long relativeOffset = registerAllocator.getNextSpillOffset();
@@ -1571,8 +1586,9 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             // 重新分配这个寄存器
             reg = spilledReg;
         } else {
-            System.err.println("allocateTempRegisterWithSpill " + reg.name());
+            System.err.println("allocateTempRegisterWithSpill " + reg.name() + " - SUCCESS");
         }
+        System.err.println("Current temp register state: allocated=" + registerAllocator.getAllocatedRegisters());
         return reg;
     }
 
@@ -1603,10 +1619,10 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
             // 清理溢出状态（弹出栈顶）
             registerAllocator.clearSpill(register);
+        } else {
+            // 释放寄存器,栈上没有了才需要真正释放，否则只是逻辑释放，恢复其值就可以了
+            registerAllocator.releaseTempRegister(register);
         }
-
-        // 释放寄存器
-        registerAllocator.releaseTempRegister(register);
     }
 
     /**
@@ -1622,13 +1638,13 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         };
 
         for (Register[] pair : registerPairs) {
-            boolean shouldSavePair =  true;
-//            for (Register reg : pair) {
-//                if (usedCallerSaved.contains(reg)) {
-//                    shouldSavePair = true;
-//                    break;
-//                }
-//            }
+            boolean shouldSavePair = true;
+            // for (Register reg : pair) {
+            // if (usedCallerSaved.contains(reg)) {
+            // shouldSavePair = true;
+            // break;
+            // }
+            // }
 
             if (shouldSavePair) {
                 assembly.add(new Directive("\tstp\t" + pair[0] + ", " + pair[1] + ", [sp, #-16]!"));
@@ -1650,12 +1666,12 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
         for (Register[] pair : registerPairs) {
             boolean shouldRestorePair = true;
-//            for (Register reg : pair) {
-//                if (usedCallerSaved.contains(reg)) {
-//                    shouldRestorePair = true;
-//                    break;
-//                }
-//            }
+            // for (Register reg : pair) {
+            // if (usedCallerSaved.contains(reg)) {
+            // shouldRestorePair = true;
+            // break;
+            // }
+            // }
 
             if (shouldRestorePair) {
                 assembly.add(new Directive("\tldp\t" + pair[0] + ", " + pair[1] + ", [sp], #16"));

@@ -60,7 +60,7 @@ public class RegisterAllocator {
     private final Map<Entity, LifeRange> lifeRanges = new HashMap<>();
     /* 设计这个的目的是为了将寄存器分配逻辑完全放到CodeGenerator中，CodeGenerator不再保留任何硬编码代码 */
     private final Register[] totalTempRegisters = {
-             Register.X12,
+            // Register.X12,
             Register.X13,
             Register.X16
     };
