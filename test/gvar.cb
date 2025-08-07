@@ -16,7 +16,7 @@ main(int argc, char **argv)
 
     puts("");
 
-    stdin = NULL;
+    __stdinp = NULL;
 
     return 0;
 }

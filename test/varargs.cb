@@ -11,5 +11,5 @@ static void
 myprintf(char* fmt, ...)
 {
     va_list ap = va_init(&fmt);
-    vfprintf(stdout, fmt, ap);
+    vfprintf(__stdoutp, fmt, ap);
 }
