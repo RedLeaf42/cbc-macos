@@ -133,7 +133,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     }
 
     private Symbol PLTSymbol(Symbol base) {
-        return new SuffixedSymbol(base, "@PLT");
+        return new SuffixedSymbol(base, "");
     }
 
     private void locateGlobalVariable(Entity ent) {
@@ -1622,13 +1622,13 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         };
 
         for (Register[] pair : registerPairs) {
-            boolean shouldSavePair = false;
-            for (Register reg : pair) {
-                if (usedCallerSaved.contains(reg)) {
-                    shouldSavePair = true;
-                    break;
-                }
-            }
+            boolean shouldSavePair =  true;
+//            for (Register reg : pair) {
+//                if (usedCallerSaved.contains(reg)) {
+//                    shouldSavePair = true;
+//                    break;
+//                }
+//            }
 
             if (shouldSavePair) {
                 assembly.add(new Directive("\tstp\t" + pair[0] + ", " + pair[1] + ", [sp, #-16]!"));
@@ -1649,13 +1649,13 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         };
 
         for (Register[] pair : registerPairs) {
-            boolean shouldRestorePair = false;
-            for (Register reg : pair) {
-                if (usedCallerSaved.contains(reg)) {
-                    shouldRestorePair = true;
-                    break;
-                }
-            }
+            boolean shouldRestorePair = true;
+//            for (Register reg : pair) {
+//                if (usedCallerSaved.contains(reg)) {
+//                    shouldRestorePair = true;
+//                    break;
+//                }
+//            }
 
             if (shouldRestorePair) {
                 assembly.add(new Directive("\tldp\t" + pair[0] + ", " + pair[1] + ", [sp], #16"));

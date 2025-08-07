@@ -5,6 +5,7 @@ import net.loveruby.cflat.ir.*;
 
 import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Function;
 import java.util.stream.Collectors;
 
 /**
@@ -59,7 +60,7 @@ public class RegisterAllocator {
     private final Map<Entity, LifeRange> lifeRanges = new HashMap<>();
     /* 设计这个的目的是为了将寄存器分配逻辑完全放到CodeGenerator中，CodeGenerator不再保留任何硬编码代码 */
     private final Register[] totalTempRegisters = {
-            // Register.X12,
+             Register.X12,
             Register.X13,
             Register.X16
     };
@@ -302,6 +303,9 @@ public class RegisterAllocator {
             // 如果表达式是Call，还需要收集Call的参数
             if (exprStmt.expr() instanceof Call) {
                 Call call = (Call) exprStmt.expr();
+                if (!call.isStaticCall()) {
+                    collectUses(call.expr(), uses);
+                }
                 for (Expr arg : call.args()) {
                     collectUses(arg, uses);
                 }
@@ -634,14 +638,23 @@ public class RegisterAllocator {
         Set<Register> liveCallerSaved = new HashSet<>();
 
         // 获取语句后的活跃变量
-        Set<Entity> liveEntities = liveAfter.get(stmt);
+        Set<Entity> liveEntities = liveBefore.get(stmt);
         if (liveEntities != null) {
+            System.err.println("getLiveCallerSavedRegisters not empty: before"
+                    + liveEntities.stream().map(Entity::name).collect(Collectors.toList()));
+            Set<Entity> liveEntitiesAfter = liveAfter.get(stmt);
+            if (liveEntitiesAfter != null) {
+                System.err.println("getLiveCallerSavedRegisters not empty: after"
+                        + liveEntitiesAfter.stream().map(Entity::name).collect(Collectors.toList()));
+            }
             for (Entity entity : liveEntities) {
                 Register reg = registerMap.get(entity);
                 if (reg != null && isCallerSaved(reg)) {
                     liveCallerSaved.add(reg);
                 }
             }
+        } else {
+            System.err.println("getLiveCallerSavedRegisters empty");
         }
 
         return liveCallerSaved;
