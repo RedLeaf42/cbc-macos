@@ -509,7 +509,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         }
 
         int stackArgs = Math.max(0, total - ARG_REGS.length);
-        int shadow = isVar ? 8 * total : 0;
+        int shadow = isVar ? 8 * (total-fixed) : 0;
         int temp = total * 8;
         int block = shadow + stackArgs * 8 + temp;
         block = (block + 15) & ~15;

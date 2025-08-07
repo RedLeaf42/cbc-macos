@@ -36,6 +36,17 @@ public class RegisterAllocator {
             net.loveruby.cflat.sysdep.arm64.Register.X15
     };
 
+    // 新增：参数寄存器（x1-x7），只用于不跨调用的变量
+    private static final Register[] ARGUMENT_REGS = {
+            net.loveruby.cflat.sysdep.arm64.Register.X1,
+            net.loveruby.cflat.sysdep.arm64.Register.X2,
+            net.loveruby.cflat.sysdep.arm64.Register.X3,
+            net.loveruby.cflat.sysdep.arm64.Register.X4,
+            net.loveruby.cflat.sysdep.arm64.Register.X5,
+            net.loveruby.cflat.sysdep.arm64.Register.X6,
+            net.loveruby.cflat.sysdep.arm64.Register.X7
+    };
+
     // 当前可用的寄存器
     private Set<net.loveruby.cflat.sysdep.arm64.Register> availableCalleeSaved = new LinkedHashSet<>(
             Arrays.asList(CALLEE_SAVED));
@@ -886,11 +897,14 @@ public class RegisterAllocator {
     private Register findReusableRegister(LifeRange newRange) {
         Set<Register> candidateRegisters = new LinkedHashSet<>();
 
-        // 1. 确定优先的候选寄存器池（caller-saved 或 callee-saved）
+        // 1. 确定优先的候选寄存器池
         if (newRange.crossesCall) {
+            // 跨调用的变量：不使用x1-x7，只使用callee-saved和caller-saved
             candidateRegisters.addAll(Arrays.asList(CALLEE_SAVED));
             candidateRegisters.addAll(Arrays.asList(CALLER_SAVED));
         } else {
+            // 不跨调用的变量：优先使用x1-x7，然后caller-saved，最后callee-saved
+            candidateRegisters.addAll(Arrays.asList(ARGUMENT_REGS));
             candidateRegisters.addAll(Arrays.asList(CALLER_SAVED));
             candidateRegisters.addAll(Arrays.asList(CALLEE_SAVED));
         }
