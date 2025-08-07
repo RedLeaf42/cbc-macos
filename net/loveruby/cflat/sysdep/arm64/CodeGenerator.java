@@ -521,14 +521,12 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
         // Pass1: L->R
         for (int i = 0; i < total; ++i) {
-            System.err.println("visit(Call) - Pass1, arg " + i + " before accept");
             args.get(i).accept(this); // x0
-            System.err.println("visit(Call) - Pass1, arg " + i + " after accept");
             assembly.add(new Directive("\tstr\tx0, [sp, #" + (tempBase + i * 8L) + "]"));
         }
-        System.err.println("visit(Call) - Pass1 complete, before allocateTempRegisterWithSpill");
-        Register tempRegister = allocateTempRegisterWithSpill();
-        System.err.println("visit(Call) - allocated tempRegister: " + tempRegister.name());
+        TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
+                "Call");
+        Register tempRegister = allocateTempRegisterWithSpill(context, "call mov args");
         // Pass2: L->R
         for (int i = 0; i < total; ++i) {
             long src = tempBase + i * 8L;
@@ -558,7 +556,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + off + "]"));
             }
         }
-        releaseTempRegisterWithRestore(tempRegister);
+        releaseTempRegisterWithRestore(tempRegister, context);
         if (e.isStaticCall()) {
             // 对于变长参数函数，我们需要特殊处理va_init调用
             if (e.function().name().equals("va_init")) {
@@ -569,7 +567,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         } else {
             // 对于间接函数调用，需要将函数地址加载到不同的寄存器，避免覆盖x0中的参数
             e.expr().accept(this); // callee -> x0
-            tempRegister = allocateTempRegisterWithSpill();
+            tempRegister = allocateTempRegisterWithSpill(context, "tmp pointer");
             assembly.add(new Directive("\tmov\t" + tempRegister + ", x0")); // 将函数地址移动到CALL_TMP
             // 现在需要将第一个参数重新加载到x0
             // todo 严格来说这里是有语法错误的，这里会导致第一个表达式执行两次
@@ -577,7 +575,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 e.args().get(0).accept(this); // 重新加载第一个参数到x0
             }
             assembly.add(new Directive("\tblr\t" + tempRegister)); // 使用CALL_TMP调用函数
-            releaseTempRegisterWithRestore(tempRegister);
+            releaseTempRegisterWithRestore(tempRegister, context);
         }
 
         if (block > 0)
@@ -592,6 +590,8 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
     @Override
     public Void visit(Assign s) {
+        TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
+                "Assign");
         // 检查LHS是否是Var类型，且已分配寄存器
         if (s.lhs() instanceof Var) {
             Var var = (Var) s.lhs();
@@ -643,17 +643,17 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             // 如果寄存器中没有，溢出中也没有计算，那说明这个变量应该是全局变量
             // 对于Var类型的LHS，直接计算RHS并存储
             s.rhs().accept(this);
-            Register temp = allocateTempRegisterWithSpill();
+            Register temp = allocateTempRegisterWithSpill(context, "assign rhs save");
             assembly.add(new Directive("\tmov\t" + temp + ", x0"));
             storeToVar((Var) s.lhs(), temp);
-            releaseTempRegisterWithRestore(temp);
+            releaseTempRegisterWithRestore(temp, context);
             return null;
         }
 
         // 1) 先算 RHS，值在 x0
         s.rhs().accept(this);
-        Register temp = allocateTempRegisterWithSpill();
-        Register temp2 = allocateTempRegisterWithSpill();
+        Register temp = allocateTempRegisterWithSpill(context, "assign tmp0");
+        Register temp2 = allocateTempRegisterWithSpill(context, "assign tmp1");
         assembly.add(new Directive("\tmov\t" + temp + ", x0")); // 保存值
 
         long sz = s.lhs().type().size(); // 1/2/4/8
@@ -661,7 +661,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         if (s.lhs() instanceof Addr) {
             addrOfEntityInto(((Addr) s.lhs()).entity(), temp2.name());
         } else if (s.lhs() instanceof Mem) {
-            evalAddressInto(((Mem) s.lhs()).expr(), temp2.name());
+            evalAddressInto(((Mem) s.lhs()).expr(), temp2);
         } else {
             errorHandler.error("unsupported LHS in Assign");
             return null;
@@ -682,8 +682,9 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         } else {
             errorHandler.error("unsupported store size: " + sz);
         }
-        releaseTempRegisterWithRestore(temp);
-        releaseTempRegisterWithRestore(temp2);
+        releaseTempRegisterWithRestore(temp, context);
+        releaseTempRegisterWithRestore(temp2, context);
+        context.checkState();
         return null;
     }
 
@@ -711,20 +712,23 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
     @Override
     public Void visit(Switch s) {
+        TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
+                "Switch");
         s.cond().accept(this);
         // 条件值现在在 x0 中
         for (Case c : s.cases()) {
             // 将 case 值加载到临时寄存器
-            Register tmp = allocateTempRegisterWithSpill();
+            Register tmp = allocateTempRegisterWithSpill(context, "switch case");
             materializeImmediate64(tmp.name(), c.value, false);
             // 比较条件值和 case 值
             assembly.add(new Directive("\tcmp\tx0, " + tmp));
             // 如果相等，跳转到对应的标签
             assembly.add(new Directive("\tbeq\t" + c.label.symbol().toSource(labelSymbols) + "f"));
-            releaseTempRegisterWithRestore(tmp);
+            releaseTempRegisterWithRestore(tmp, context);
         }
         // 如果没有匹配的 case，跳转到 default 标签
         assembly.add(new Directive("\tb\t" + s.defaultLabel().symbol().toSource(labelSymbols) + "f"));
+        context.checkState();
         return null;
     }
 
@@ -778,15 +782,13 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
     @Override
     public Void visit(Bin e) {
-        System.err.println("visit(Bin) - op: " + e.op() + ", before right()");
         // 使用临时寄存器避免寄存器冲突
+        TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
+                "Bin");
         e.right().accept(this);
-        System.err.println("visit(Bin) - after right(), before allocateTempRegisterWithSpill");
-        Register tmp0 = allocateTempRegisterWithSpill();
-        System.err.println("visit(Bin) - allocated tmp0: " + tmp0.name());
+        Register tmp0 = allocateTempRegisterWithSpill(context, "bin right");
         assembly.add(new Directive("\tmov\t" + tmp0.name() + ", x0"));
 
-        System.err.println("visit(Bin) - before left()");
         e.left().accept(this);
 
         switch (e.op()) {
@@ -803,11 +805,11 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 assembly.add(new Directive("\tsdiv\tx0, x0, " + tmp0));
                 break;
             case S_MOD:
-                Register tempRegister = allocateTempRegisterWithSpill();
+                Register tempRegister = allocateTempRegisterWithSpill(context, "mod");
                 assembly.add(new Directive("\tsdiv\t" + tempRegister + ", x0, " + tmp0));
                 assembly.add(new Directive("\tmul\t" + tempRegister + ", " + tempRegister + ", " + tmp0));
                 assembly.add(new Directive("\tsub\tx0, x0, " + tempRegister));
-                releaseTempRegisterWithRestore(tempRegister);
+                releaseTempRegisterWithRestore(tempRegister, context);
                 break;
             case BIT_AND:
                 assembly.add(new Directive("\tand\tx0, x0, " + tmp0));
@@ -852,9 +854,8 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 // 保持x0不变
                 break;
         }
-        System.err.println("visit(Bin) - before releaseTempRegisterWithRestore tmp0: " + tmp0.name());
-        releaseTempRegisterWithRestore(tmp0);
-        System.err.println("visit(Bin) - after releaseTempRegisterWithRestore");
+        releaseTempRegisterWithRestore(tmp0, context);
+        context.checkState();
         return null;
     }
 
@@ -867,8 +868,10 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     @Override
     public Void visit(Mem e) {
         // 计算地址到 x11，避免覆盖 x0 里的中间值
-        Register temp = allocateTempRegisterWithSpill();
-        evalAddressInto(e.expr(), temp.name());
+        TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
+                "Mem");
+        Register temp = allocateTempRegisterWithSpill(context, "mem");
+        evalAddressInto(e.expr(), temp);
         String tempRef = "[" + temp.name() + "]";
         long sz = e.type().size();
 
@@ -887,7 +890,8 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         } else {
             errorHandler.error("unsupported load size: " + sz);
         }
-        releaseTempRegisterWithRestore(temp);
+        releaseTempRegisterWithRestore(temp, context);
+        context.checkState();
         return null;
     }
 
@@ -1081,7 +1085,11 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         }
     }
 
-    private void evalAddressInto(Expr e, String dst) {
+    private void evalAddressInto(Expr e, Register dstRegister) {
+        String dst = dstRegister.name();
+        TempRegisterAllocationContext context = new TempRegisterAllocationContext(
+                registerAllocator.getSpillSlotCount() - 1, "evalAddressInto");
+        context.recordRegisterAllocation(dstRegister);
         if (e instanceof Addr) {
             addrOfEntityInto(((Addr) e).entity(), dst);
             return;
@@ -1096,7 +1104,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         }
         if (e instanceof Mem) {
             // 递归计算地址到 dst
-            evalAddressInto(((Mem) e).expr(), dst);
+            evalAddressInto(((Mem) e).expr(), dstRegister);
             // 对结果再做一次解引用，从 dst 指向的地址加载值到 dst
             long sz = e.type().size();
             if (sz == 1) {
@@ -1123,7 +1131,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             Bin b = (Bin) e;
             Op op = b.op();
             if (op == Op.ADD || op == Op.SUB) {
-                evalAddressInto(b.left(), dst); // base -> dst
+                evalAddressInto(b.left(), dstRegister); // base -> dst
                 // 使用临时寄存器计算右边的表达式，避免寄存器冲突
                 b.right().accept(this);
                 if (op == Op.ADD)
@@ -1134,7 +1142,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             }
             // 对于其他操作，使用临时寄存器避免寄存器冲突
             b.right().accept(this);
-            Register tempRegister = allocateTempRegisterWithSpill();
+            Register tempRegister = allocateTempRegisterWithSpill(context, "evalAddressInto other");
             if (tempRegister.name().equals(dst)) {
                 throw new IllegalStateException(("tmpRegister wrong !! " + dst));
             }
@@ -1149,14 +1157,14 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                     assembly.add(new Directive("\tsdiv\t" + dst + ", x0, " + tempRegister));
                     break;
                 case S_MOD:
-                    Register tempRegister2 = allocateTempRegisterWithSpill();
+                    Register tempRegister2 = allocateTempRegisterWithSpill(context, "evalAddressInto mod");
                     if (tempRegister2.name().equals(dst) || tempRegister2.name().equals(tempRegister.name())) {
                         throw new IllegalStateException(("tmpRegister wrong stage 2!! " + dst));
                     }
                     assembly.add(new Directive("\tsdiv\t" + tempRegister2 + ", x0, " + tempRegister));
                     assembly.add(new Directive("\tmul\t" + tempRegister2 + ", " + tempRegister2 + ", " + tempRegister));
                     assembly.add(new Directive("\tsub\t" + dst + ", x0, " + tempRegister));
-                    releaseTempRegisterWithRestore(tempRegister2);
+                    releaseTempRegisterWithRestore(tempRegister2, context);
                     break;
                 case BIT_AND:
                     assembly.add(new Directive("\tand\t" + dst + ", x0, " + tempRegister));
@@ -1178,7 +1186,8 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                     errorHandler.error("unsupported binary operation in address calculation: " + op);
                     break;
             }
-            releaseTempRegisterWithRestore(tempRegister);
+            releaseTempRegisterWithRestore(tempRegister, context);
+            context.checkState();
             return;
         }
         // fallback
@@ -1551,16 +1560,19 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     /**
      * 分配临时寄存器，如果池为空则处理溢出（支持重复spill）
      */
-    private Register allocateTempRegisterWithSpill() {
+    private Register allocateTempRegisterWithSpill(TempRegisterAllocationContext context, String label) {
+        context.recordAlloc();
         Register reg = registerAllocator.allocateTempRegister();
         if (reg == null) {
-            System.err.println("=== TEMP REGISTER EXHAUSTED ===");
-            System.err.println("Current allocated registers: " + registerAllocator.getAllocatedRegisters());
-            System.err.println("Spill slot count: " + registerAllocator.getSpillSlotCount());
-            // 打印调用栈
-            (new Throwable()).printStackTrace();
             // 需要溢出，获取需要溢出的寄存器
             Register spilledReg = registerAllocator.getRegisterToSpill();
+
+            // 检查这个寄存器是否已经被当前context分配过
+            if (context.isRegisterAllocated(spilledReg)) {
+                throw new IllegalStateException("Register " + spilledReg.name()
+                        + " is already allocated in this context. Source: " + context.source + ", Label: " + label);
+            }
+
             long relativeOffset = registerAllocator.getNextSpillOffset();
             // 临时寄存器溢出使用相对于sp的偏移量，指向栈帧底部
             // 栈帧布局：[sp] -> [局部变量] -> [临时寄存器溢出] -> [寄存器保存] -> [参数]
@@ -1568,7 +1580,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             // 检查寄存器是否已经被spill过
             int spillDepth = registerAllocator.getSpillDepth(spilledReg);
             System.err.println("allocateTempRegisterWithSpill " + spilledReg.name() + " to " + absoluteOffset
-                    + " (spill depth: " + spillDepth + ")");
+                    + " (spill depth: " + spillDepth + ")" + " source:" + context.source + " label: " + label);
 
             // 生成溢出代码：保存寄存器内容到栈
             // 如果偏移量超过ARM64的限制，使用基址寄存器+偏移量的方式
@@ -1586,17 +1598,22 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             // 重新分配这个寄存器
             reg = spilledReg;
         } else {
-            System.err.println("allocateTempRegisterWithSpill " + reg.name() + " - SUCCESS");
+            System.err.println(
+                    "allocateTempRegisterWithSpill " + reg.name() + " source: " + context.source + " label:" + label);
         }
-        System.err.println("Current temp register state: allocated=" + registerAllocator.getAllocatedRegisters());
+
+        // 记录这个寄存器被当前context分配
+        context.recordRegisterAllocation(reg);
         return reg;
     }
 
     /**
      * 释放临时寄存器，如果被溢出则恢复（支持重复spill）
      */
-    private void releaseTempRegisterWithRestore(Register register) {
+    private void releaseTempRegisterWithRestore(Register register, TempRegisterAllocationContext context) {
         // 检查这个寄存器是否被溢出
+        context.recordRelease();
+        context.recordRegisterRelease(register); // 记录寄存器释放
         Long relativeOffset = registerAllocator.getSpillOffset(register);
         if (relativeOffset != null) {
             // 临时寄存器溢出使用相对于sp的偏移量
@@ -1604,8 +1621,9 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
             // 获取spill深度信息
             int spillDepth = registerAllocator.getSpillDepth(register);
-            System.err.println("releaseTempRegisterWithRestore " + register.name() + " from " + absoluteOffset
-                    + " (spill depth: " + spillDepth + ")");
+            String errMessage = "releaseTempRegisterWithRestore " + register.name() + " from " + absoluteOffset
+                    + " (spill depth: " + spillDepth + ")" + " source:" + context.source;
+            System.err.println(errMessage);
 
             // 生成恢复代码：从栈上恢复寄存器内容
             // 如果偏移量超过ARM64的限制，使用基址寄存器+偏移量的方式
@@ -1620,7 +1638,8 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             // 清理溢出状态（弹出栈顶）
             registerAllocator.clearSpill(register);
         } else {
-            // 释放寄存器,栈上没有了才需要真正释放，否则只是逻辑释放，恢复其值就可以了
+            System.err.println("releaseTempRegisterWithRestore " + register.name() + " source:" + context.source);
+            // 释放寄存器
             registerAllocator.releaseTempRegister(register);
         }
     }

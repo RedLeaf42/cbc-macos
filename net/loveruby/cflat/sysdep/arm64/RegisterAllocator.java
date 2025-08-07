@@ -78,6 +78,9 @@ public class RegisterAllocator {
     private final Map<Register, Stack<Long>> registerSpillStack = new HashMap<>();
     private long nextSpillOffset = -8L; // 从-8开始，每次-8，用于变量spill
 
+    // 用于公平spill策略的轮询计数器
+    private int spillRoundRobinCounter = 0;
+
     public int getSpillSlotCount() {
         return spillSlotCount;
     }
@@ -97,13 +100,26 @@ public class RegisterAllocator {
     }
 
     /**
-     * 获取需要溢出的寄存器（最老的已分配寄存器）
+     * 获取需要溢出的寄存器（使用轮询策略，公平地选择寄存器）
      */
     public Register getRegisterToSpill() {
         if (allocatedTempRegisters.isEmpty()) {
             throw new IllegalStateException("no allocated temp register to spill");
         }
-        return allocatedTempRegisters.iterator().next();
+
+        // 将已分配的寄存器转换为数组，以便进行轮询
+        Register[] allocatedArray = allocatedTempRegisters.toArray(new Register[0]);
+
+        // 使用轮询策略选择寄存器
+        Register selectedReg = allocatedArray[spillRoundRobinCounter % allocatedArray.length];
+
+        // 更新轮询计数器
+        spillRoundRobinCounter++;
+
+        System.err.println(
+                "Fair spill strategy: selected " + selectedReg.name() + " (round " + spillRoundRobinCounter + ")");
+
+        return selectedReg;
     }
 
     /**
