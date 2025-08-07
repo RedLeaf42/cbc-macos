@@ -291,7 +291,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator,
     }
 
     private Symbol PLTSymbol(Symbol base) {
-        return new SuffixedSymbol(base, "@PLT");
+        return new SuffixedSymbol(base, "");
     }
     // #@@}
 

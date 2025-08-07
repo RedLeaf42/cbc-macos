@@ -29,7 +29,7 @@ public class RegisterAllocator {
             net.loveruby.cflat.sysdep.arm64.Register.X9,
             net.loveruby.cflat.sysdep.arm64.Register.X10,
             net.loveruby.cflat.sysdep.arm64.Register.X11,
-            net.loveruby.cflat.sysdep.arm64.Register.X12,
+            // net.loveruby.cflat.sysdep.arm64.Register.X12,
             // net.loveruby.cflat.sysdep.arm64.Register.X13,
             net.loveruby.cflat.sysdep.arm64.Register.X14,
             net.loveruby.cflat.sysdep.arm64.Register.X15
@@ -59,6 +59,7 @@ public class RegisterAllocator {
     private final Map<Entity, LifeRange> lifeRanges = new HashMap<>();
     /* 设计这个的目的是为了将寄存器分配逻辑完全放到CodeGenerator中，CodeGenerator不再保留任何硬编码代码 */
     private final Register[] totalTempRegisters = {
+            // Register.X12,
             Register.X13,
             Register.X16
     };
@@ -89,7 +90,6 @@ public class RegisterAllocator {
             return null;
         }
         Register item = tempAvaiableRegisterList.iterator().next();
-        System.err.println("allocate item at " + item.name());
         tempAvaiableRegisterList.remove(item);
         allocatedTempRegisters.add(item); // 记录已分配
         return item;
@@ -157,10 +157,12 @@ public class RegisterAllocator {
                 break;
             }
         }
-        if (valid) {
+        if (valid && !hasSpillHistory(register)) {
             System.err.println("releaseTempRegister item at " + register.name());
             allocatedTempRegisters.remove(register); // 从已分配列表中移除
             tempAvaiableRegisterList.add(register);
+        } else if (valid && hasSpillHistory(register)) {
+            System.err.println("releaseTempRegister skipped for " + register.name() + " (has spill history)");
         }
     }
 
@@ -608,6 +610,53 @@ public class RegisterAllocator {
     public int getSpillDepth(Register reg) {
         Stack<Long> stack = registerSpillStack.get(reg);
         return stack != null ? stack.size() : 0;
+    }
+
+    /**
+     * 获取当前正在使用的caller-saved寄存器
+     */
+    public Set<Register> getUsedCallerSavedRegisters() {
+        Set<Register> usedCallerSaved = new HashSet<>();
+        for (Map.Entry<Entity, Register> entry : registerMap.entrySet()) {
+            Register reg = entry.getValue();
+            if (isCallerSaved(reg)) {
+                usedCallerSaved.add(reg);
+            }
+        }
+        return usedCallerSaved;
+    }
+
+    /**
+     * 获取在特定语句点活跃的caller-saved寄存器
+     * 这个方法用于在函数调用时只保存和恢复实际活跃的caller-saved寄存器
+     */
+    public Set<Register> getLiveCallerSavedRegisters(Stmt stmt) {
+        Set<Register> liveCallerSaved = new HashSet<>();
+
+        // 获取语句后的活跃变量
+        Set<Entity> liveEntities = liveAfter.get(stmt);
+        if (liveEntities != null) {
+            for (Entity entity : liveEntities) {
+                Register reg = registerMap.get(entity);
+                if (reg != null && isCallerSaved(reg)) {
+                    liveCallerSaved.add(reg);
+                }
+            }
+        }
+
+        return liveCallerSaved;
+    }
+
+    /**
+     * 检查寄存器是否为caller-saved
+     */
+    private boolean isCallerSaved(Register reg) {
+        for (Register callerSaved : CALLER_SAVED) {
+            if (reg.name().equals(callerSaved.name())) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /**

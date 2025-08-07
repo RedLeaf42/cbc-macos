@@ -45,6 +45,9 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     private Map<Entity, net.loveruby.cflat.asm.Register> registerMap = new HashMap<>();
     private Map<Entity, Long> spillOffsets = new HashMap<>();
 
+    // 当前正在处理的语句（用于活跃变量分析）
+    private Stmt currentStmt;
+
     public CodeGenerator(net.loveruby.cflat.sysdep.CodeGeneratorOptions opts,
             net.loveruby.cflat.asm.Type naturalType,
             ErrorHandler h) {
@@ -130,7 +133,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     }
 
     private Symbol PLTSymbol(Symbol base) {
-        return new SuffixedSymbol(base, "");
+        return new SuffixedSymbol(base, "@PLT");
     }
 
     private void locateGlobalVariable(Entity ent) {
@@ -368,8 +371,10 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         assembly.add(new Directive("\t.p2align\t2"));
         assembly.add(new Label(new NamedSymbol(funcName)));
         genPrologue();
-        for (Stmt s : func.ir())
+        for (Stmt s : func.ir()) {
+            currentStmt = s;
             s.accept(this);
+        }
         assembly.add(new Label(new NamedSymbol(".L" + func.name() + "_epilogue")));
         genEpilogue();
     }
@@ -464,12 +469,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     }
 
     private void genEpilogue() {
-        if (frameSize > 0) {
-            // 确保frameSize是16字节对齐的
-            long alignedFrameSize = (frameSize + 15) & ~15;
-            // assembly.add(new Directive("\tadd\tsp, sp, #" + alignedFrameSize));
-            assembly.add(new Directive("\tmov\tsp, x29"));
-        }
         // 恢复保存的寄存器
         // todo 需要注意现在的恢复方法不能通过alloca的测试,对吗？
         int counter = 0;
@@ -477,6 +476,8 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             assembly.add(new Directive("\tldr\t" + register.name() + ", [x29,-" + (counter + 1) * 8 + "]"));
             counter++;
         }
+        // 恢复栈指针
+        assembly.add(new Directive("\tmov\tsp, x29"));
         assembly.add(new Directive("\tldp\tx29, x30, [sp], #16"));
         assembly.add(new Directive("\tret"));
     }
@@ -494,13 +495,17 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             fixed = e.function().type().getFunctionType().paramTypes().size();
         }
 
-        // 这里使用sp保存的一个问题在于，如果是调用的alloca，恢复的时候会导致栈破坏
+        // 优化：只保存实际使用到的caller-saved寄存器
         boolean shouldSaveCallerRegister = !e.isStaticCall() || !e.function().name().equals("alloca");
+        Set<Register> usedCallerSaved = new HashSet<>();
         if (shouldSaveCallerRegister) {
-            assembly.add(new Directive("\tstp\tx9, x10, [sp, #-16]!"));
-            assembly.add(new Directive("\tstp\tx11, x12, [sp, #-16]!"));
-            assembly.add(new Directive("\tstp\tx13, x14, [sp, #-16]!"));
-            assembly.add(new Directive("\tstp\tx15, x16, [sp, #-16]!"));
+            // 获取在函数调用点实际活跃的caller-saved寄存器
+            usedCallerSaved = registerAllocator.getLiveCallerSavedRegisters(currentStmt);
+            System.err.println("Live caller-saved registers at call site: "
+                    + usedCallerSaved.stream().map(Register::name).collect(Collectors.joining(", ")));
+
+            // 按寄存器对保存，保持16字节对齐
+            saveCallerSavedRegisters(usedCallerSaved);
         }
 
         int stackArgs = Math.max(0, total - ARG_REGS.length);
@@ -519,7 +524,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             args.get(i).accept(this); // x0
             assembly.add(new Directive("\tstr\tx0, [sp, #" + (tempBase + i * 8L) + "]"));
         }
-        Register tempRegister = registerAllocator.allocateTempRegister();
+        Register tempRegister = allocateTempRegisterWithSpill();
         // Pass2: L->R
         for (int i = 0; i < total; ++i) {
             long src = tempBase + i * 8L;
@@ -549,7 +554,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + off + "]"));
             }
         }
-        registerAllocator.releaseTempRegister(tempRegister);
+        releaseTempRegisterWithRestore(tempRegister);
         if (e.isStaticCall()) {
             // 对于变长参数函数，我们需要特殊处理va_init调用
             if (e.function().name().equals("va_init")) {
@@ -568,17 +573,14 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 e.args().get(0).accept(this); // 重新加载第一个参数到x0
             }
             assembly.add(new Directive("\tblr\t" + tempRegister)); // 使用CALL_TMP调用函数
-            registerAllocator.releaseTempRegister(tempRegister);
+            releaseTempRegisterWithRestore(tempRegister);
         }
 
         if (block > 0)
             assembly.add(new Directive("\tadd\tsp, sp, #" + block));
         if (shouldSaveCallerRegister) {
             // 恢复caller-saved寄存器，使用ldp保持16字节对齐
-            assembly.add(new Directive("\tldp\tx15, x16, [sp], #16"));
-            assembly.add(new Directive("\tldp\tx13, x14, [sp], #16"));
-            assembly.add(new Directive("\tldp\tx11, x12, [sp], #16"));
-            assembly.add(new Directive("\tldp\tx9, x10, [sp], #16"));
+            restoreCallerSavedRegisters(usedCallerSaved);
         }
 
         return null;
@@ -651,7 +653,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         assembly.add(new Directive("\tmov\t" + temp + ", x0")); // 保存值
 
         long sz = s.lhs().type().size(); // 1/2/4/8
-        // 生成地址到 x11
+        // 生成地址到 temp2，避免覆盖temp中的值
         if (s.lhs() instanceof Addr) {
             addrOfEntityInto(((Addr) s.lhs()).entity(), temp2.name());
         } else if (s.lhs() instanceof Mem) {
@@ -772,14 +774,12 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
     @Override
     public Void visit(Bin e) {
-        // 参考x86的实现，使用栈来避免寄存器冲突
+        // 使用临时寄存器避免寄存器冲突
         e.right().accept(this);
         Register tmp0 = allocateTempRegisterWithSpill();
-        // assembly.add(new Directive("\tstr\tx0, [sp, #-16]!")); // 将右操作数压栈
         assembly.add(new Directive("\tmov\t" + tmp0.name() + ", x0"));
+
         e.left().accept(this);
-        // assembly.add(new Directive("\tldr\t" + tmp0 + ", [sp], #16")); //
-        // 将右操作数出栈到TMP0
 
         switch (e.op()) {
             case ADD:
@@ -994,7 +994,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                             assembly.add(new Directive("\tadrp\tx0, " + baseSym + "@GOTPAGE"));
                             assembly.add(new Directive("\tldr\tx0, [x0, " + baseSym + "@GOTPAGEOFF]"));
                         } else if (ent.type().isFunction() && !isDefinedHere(ent)) {
-                            // 对于外部函数，即使有预设符号，也要使用@GOT重定位
+                            // 对于外部函数，使用@PAGE和@PAGEOFF重定位
                             assembly.add(new Directive("\tadrp\tx0, " + symStr + "@GOTPAGE"));
                             assembly.add(new Directive("\tldr\tx0, [x0, " + symStr + "@GOTPAGEOFF]"));
                         } else {
@@ -1122,13 +1122,14 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                     assembly.add(new Directive("\tsub\t" + dst + ", " + dst + ", " + "x0"));
                 return;
             }
-            // 对于其他操作，使用栈操作避免寄存器冲突
+            // 对于其他操作，使用临时寄存器避免寄存器冲突
             b.right().accept(this);
-            assembly.add(new Directive("\tstr\tx0, [sp, #-16]!")); // 将右操作数压栈
-            b.left().accept(this);
             Register tempRegister = allocateTempRegisterWithSpill();
-            Register tempRegister2 = allocateTempRegisterWithSpill();
-            assembly.add(new Directive("\tldr\t" + tempRegister + ", [sp], #16")); // 将右操作数出栈到OFFT
+            if (tempRegister.name().equals(dst)) {
+                throw new IllegalStateException(("tmpRegister wrong !! " + dst));
+            }
+            assembly.add(new Directive("\tmov\t" + tempRegister + ", x0")); // 将右操作数保存到临时寄存器
+            b.left().accept(this);
 
             switch (op) {
                 case MUL:
@@ -1138,9 +1139,14 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                     assembly.add(new Directive("\tsdiv\t" + dst + ", x0, " + tempRegister));
                     break;
                 case S_MOD:
+                    Register tempRegister2 = allocateTempRegisterWithSpill();
+                    if (tempRegister2.name().equals(dst) || tempRegister2.name().equals(tempRegister.name())) {
+                        throw new IllegalStateException(("tmpRegister wrong stage 2!! " + dst));
+                    }
                     assembly.add(new Directive("\tsdiv\t" + tempRegister2 + ", x0, " + tempRegister));
                     assembly.add(new Directive("\tmul\t" + tempRegister2 + ", " + tempRegister2 + ", " + tempRegister));
                     assembly.add(new Directive("\tsub\t" + dst + ", x0, " + tempRegister));
+                    releaseTempRegisterWithRestore(tempRegister2);
                     break;
                 case BIT_AND:
                     assembly.add(new Directive("\tand\t" + dst + ", x0, " + tempRegister));
@@ -1163,7 +1169,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                     break;
             }
             releaseTempRegisterWithRestore(tempRegister);
-            releaseTempRegisterWithRestore(tempRegister2);
             return;
         }
         // fallback
@@ -1542,11 +1547,9 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             // 需要溢出，获取需要溢出的寄存器
             Register spilledReg = registerAllocator.getRegisterToSpill();
             long relativeOffset = registerAllocator.getNextSpillOffset();
-
             // 临时寄存器溢出使用相对于sp的偏移量，指向栈帧底部
             // 栈帧布局：[sp] -> [局部变量] -> [临时寄存器溢出] -> [寄存器保存] -> [参数]
             long absoluteOffset = spillOffset + relativeOffset; // 相对于sp的偏移量
-
             // 检查寄存器是否已经被spill过
             int spillDepth = registerAllocator.getSpillDepth(spilledReg);
             System.err.println("allocateTempRegisterWithSpill " + spilledReg.name() + " to " + absoluteOffset
@@ -1604,6 +1607,60 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
         // 释放寄存器
         registerAllocator.releaseTempRegister(register);
+    }
+
+    /**
+     * 保存caller-saved寄存器到栈上
+     */
+    private void saveCallerSavedRegisters(Set<Register> usedCallerSaved) {
+        // 定义caller-saved寄存器的保存顺序（按对保存，保持16字节对齐）
+        Register[][] registerPairs = {
+                { Register.X9, Register.X10 },
+                { Register.X11, Register.X12 },
+                { Register.X13, Register.X14 },
+                { Register.X15, Register.X16 }
+        };
+
+        for (Register[] pair : registerPairs) {
+            boolean shouldSavePair = false;
+            for (Register reg : pair) {
+                if (usedCallerSaved.contains(reg)) {
+                    shouldSavePair = true;
+                    break;
+                }
+            }
+
+            if (shouldSavePair) {
+                assembly.add(new Directive("\tstp\t" + pair[0] + ", " + pair[1] + ", [sp, #-16]!"));
+            }
+        }
+    }
+
+    /**
+     * 从栈上恢复caller-saved寄存器
+     */
+    private void restoreCallerSavedRegisters(Set<Register> usedCallerSaved) {
+        // 定义caller-saved寄存器的恢复顺序（按对恢复，保持16字节对齐）
+        Register[][] registerPairs = {
+                { Register.X15, Register.X16 },
+                { Register.X13, Register.X14 },
+                { Register.X11, Register.X12 },
+                { Register.X9, Register.X10 }
+        };
+
+        for (Register[] pair : registerPairs) {
+            boolean shouldRestorePair = false;
+            for (Register reg : pair) {
+                if (usedCallerSaved.contains(reg)) {
+                    shouldRestorePair = true;
+                    break;
+                }
+            }
+
+            if (shouldRestorePair) {
+                assembly.add(new Directive("\tldp\t" + pair[0] + ", " + pair[1] + ", [sp], #16"));
+            }
+        }
     }
 
 }
