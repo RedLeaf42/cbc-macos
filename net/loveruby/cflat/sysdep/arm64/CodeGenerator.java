@@ -739,35 +739,6 @@ public class CodeGenerator
         return null;
     }
 
-    public Void visit(Mem e) {
-        // 计算地址到 x11，避免覆盖 x0 里的中间值
-        TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
-                "Mem");
-        Register temp = allocateTempRegisterWithSpill(context, "mem");
-        evalAddressInto(e.expr(), temp);
-        String tempRef = "[" + temp.name() + "]";
-        long sz = e.type().size();
-
-        if (sz == 1) {
-            // 读 1 字节并做有符号扩展成 64 位
-            assembly.add(new Directive("\tldrb\tw0, " + tempRef));
-            assembly.add(new Directive("\tsxtb\tx0, w0"));
-        } else if (sz == 2) {
-            assembly.add(new Directive("\tldrh\tw0, " + tempRef));
-            assembly.add(new Directive("\tsxth\tx0, w0"));
-        } else if (sz == 4) {
-            assembly.add(new Directive("\tldr\tw0, " + tempRef));
-            assembly.add(new Directive("\tsxtw\tx0, w0"));
-        } else if (sz == 8) {
-            assembly.add(new Directive("\tldr\tx0, " + tempRef));
-        } else {
-            errorHandler.error("unsupported load size: " + sz);
-        }
-        releaseTempRegisterWithRestore(temp, context);
-        context.checkState();
-        return null;
-    }
-
 
     /* ====== Helpers ====== */
 
