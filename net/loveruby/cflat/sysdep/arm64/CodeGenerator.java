@@ -799,46 +799,6 @@ public class CodeGenerator
         return null;
     }
 
-    public Void visit(Var e) {
-        Entity ent = e.entity();
-        net.loveruby.cflat.asm.Register reg = registerMap.get(ent);
-
-        if (reg != null) {
-            // 变量在寄存器中，直接移动到x0
-            System.err.println("Loading " + ent.name() + " from register " + reg);
-            assembly.add(new Directive("\tmov\tx0, " + reg));
-        } else if (spillOffsets.containsKey(ent)) {
-            // 变量溢出到栈上，从栈加载 - 根据变量类型使用正确的加载指令
-            long offset = spillOffsets.get(ent);
-            System.err.println("Loading " + ent.name() + " from spill offset " + offset);
-
-            // 根据变量类型使用正确的加载指令，避免统一使用64位指令导致的数据覆盖问题
-            long sz = e.type().size();
-            if (sz == 8) {
-                // 64位变量：直接使用64位加载指令
-                assembly.add(new Directive("\tldr\tx0, [x29, #" + offset + "]"));
-            } else if (sz == 4) {
-                // 32位变量：使用32位加载指令，然后有符号扩展到64位
-                assembly.add(new Directive("\tldr\tw0, [x29, #" + offset + "]"));
-                assembly.add(new Directive("\tsxtw\tx0, w0"));
-            } else if (sz == 2) {
-                // 16位变量：使用16位加载指令，然后有符号扩展到64位
-                assembly.add(new Directive("\tldrh\tw0, [x29, #" + offset + "]"));
-                assembly.add(new Directive("\tsxth\tx0, w0"));
-            } else if (sz == 1) {
-                // 8位变量：使用8位加载指令，然后有符号扩展到64位
-                assembly.add(new Directive("\tldrb\tw0, [x29, #" + offset + "]"));
-                assembly.add(new Directive("\tsxtb\tx0, w0"));
-            } else {
-                errorHandler.error("unsupported load size: " + sz);
-            }
-        } else {
-            // 使用原有的栈访问方法
-            System.err.println("Loading " + ent.name() + " from stack");
-            loadFromVar(e);
-        }
-        return null;
-    }
 
     /* ====== Helpers ====== */
 
