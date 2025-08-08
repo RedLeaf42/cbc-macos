@@ -114,4 +114,37 @@ public class Register extends net.loveruby.cflat.asm.Register {
             X0, X1, X2, X3, X4, X5, X6, X7, X8, X9, X10, X11, X12, X13, X14, X15, X16, X17,
             X18, X19, X20, X21, X22, X23, X24, X25, X26, X27, X28
     };
+
+    // ARM64 floating-point registers
+    public static final Register D0 = new Register("d0", true, true, false, true);
+    public static final Register D1 = new Register("d1", true, true, false, true);
+    public static final Register D2 = new Register("d2", true, true, false, true);
+    public static final Register D3 = new Register("d3", true, true, false, true);
+    public static final Register D4 = new Register("d4", true, true, false, true);
+    public static final Register D5 = new Register("d5", true, true, false, true);
+    public static final Register D6 = new Register("d6", true, true, false, true);
+    public static final Register D7 = new Register("d7", true, true, false, true);
+    public static final Register D8 = new Register("d8", true, false, true, true);
+    public static final Register D9 = new Register("d9", true, false, true, true);
+    public static final Register D10 = new Register("d10", true, false, true, true);
+    public static final Register D11 = new Register("d11", true, false, true, true);
+    public static final Register D12 = new Register("d12", true, false, true, true);
+    public static final Register D13 = new Register("d13", true, false, true, true);
+    public static final Register D14 = new Register("d14", true, false, true, true);
+    public static final Register D15 = new Register("d15", true, false, true, true);
+
+    // Floating-point caller-saved registers
+    public static final Register[] FLOAT_CALLER_SAVED = {
+            D0, D1, D2, D3, D4, D5, D6, D7
+    };
+
+    // Floating-point callee-saved registers
+    public static final Register[] FLOAT_CALLEE_SAVED = {
+            D8, D9, D10, D11, D12, D13, D14, D15
+    };
+
+    // All floating-point registers
+    public static final Register[] ALL_FLOAT_REGISTERS = {
+            D0, D1, D2, D3, D4, D5, D6, D7, D8, D9, D10, D11, D12, D13, D14, D15
+    };
 }

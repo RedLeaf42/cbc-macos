@@ -14,7 +14,7 @@ import java.util.stream.Collectors;
  */
 public class RegisterAllocator {
 
-    // 寄存器池
+    // 整数寄存器池
     private static final Register[] CALLEE_SAVED = {
             net.loveruby.cflat.sysdep.arm64.Register.X19,
             net.loveruby.cflat.sysdep.arm64.Register.X20,
@@ -44,10 +44,40 @@ public class RegisterAllocator {
             net.loveruby.cflat.sysdep.arm64.Register.X7
     };
 
-    // 当前可用的寄存器
+    // 浮点数寄存器池
+    private static final Register[] FLOAT_CALLEE_SAVED = {
+            net.loveruby.cflat.sysdep.arm64.Register.D8,
+            net.loveruby.cflat.sysdep.arm64.Register.D9,
+            net.loveruby.cflat.sysdep.arm64.Register.D10,
+            net.loveruby.cflat.sysdep.arm64.Register.D11,
+            net.loveruby.cflat.sysdep.arm64.Register.D12,
+            net.loveruby.cflat.sysdep.arm64.Register.D13,
+            net.loveruby.cflat.sysdep.arm64.Register.D14,
+            net.loveruby.cflat.sysdep.arm64.Register.D15
+    };
+
+    private static final Register[] FLOAT_CALLER_SAVED = {
+            net.loveruby.cflat.sysdep.arm64.Register.D0,
+            net.loveruby.cflat.sysdep.arm64.Register.D1,
+            net.loveruby.cflat.sysdep.arm64.Register.D2,
+            net.loveruby.cflat.sysdep.arm64.Register.D3,
+            net.loveruby.cflat.sysdep.arm64.Register.D4,
+            net.loveruby.cflat.sysdep.arm64.Register.D5,
+            net.loveruby.cflat.sysdep.arm64.Register.D6,
+            net.loveruby.cflat.sysdep.arm64.Register.D7
+    };
+
+    // 当前可用的整数寄存
     private Set<net.loveruby.cflat.sysdep.arm64.Register> availableCalleeSaved = new LinkedHashSet<>(
             Arrays.asList(CALLEE_SAVED));
     private Set<Register> availableCallerSaved = new LinkedHashSet<>(Arrays.asList(CALLER_SAVED));
+
+    // 当前可用的浮点数寄存器
+    private Set<Register> availableFloatCalleeSaved = new LinkedHashSet<>(
+            Arrays.asList(FLOAT_CALLEE_SAVED));
+    private Set<Register> availableFloatCallerSaved = new LinkedHashSet<>(
+            Arrays.asList(FLOAT_CALLER_SAVED));
+
     private Map<DefinedVariable, LocalScope> variableLocalScopeMap = new HashMap<>();
 
     // 变量到寄存器的映射
@@ -67,6 +97,7 @@ public class RegisterAllocator {
     // 变量生命周期
     private final Map<Entity, LifeRange> lifeRanges = new HashMap<>();
     /* 设计这个的目的是为了将寄存器分配逻辑完全放到CodeGenerator中，CodeGenerator不再保留任何硬编码代码 */
+    // 整数临时寄存器
     private final Register[] totalTempRegisters = {
             Register.X13,
             Register.X14,
@@ -76,8 +107,23 @@ public class RegisterAllocator {
     private final Set<Register> tempAvaiableRegisterList = new LinkedHashSet<>(Arrays.asList(
             totalTempRegisters));
 
+    // 浮点数临时寄存器
+    private final Register[] totalFloatTempRegisters = {
+            Register.D0,
+            Register.D1,
+            Register.D2,
+            Register.D3,
+            Register.D4,
+            Register.D5,
+            Register.D6,
+            Register.D7
+    };
+    private final Set<Register> tempFloatAvaiableRegisterList = new LinkedHashSet<>(Arrays.asList(
+            totalFloatTempRegisters));
+
     // 跟踪已分配的临时寄存器（正在使用中）
     private final Set<Register> allocatedTempRegisters = new LinkedHashSet<>();
+    private final Set<Register> allocatedFloatTempRegisters = new LinkedHashSet<>();
 
     // 跟踪临时寄存器的溢出状态
     private final Map<Register, Long> tempSpillOffsets = new HashMap<>();
@@ -96,7 +142,7 @@ public class RegisterAllocator {
     }
 
     /**
-     * 分配临时寄存器，如果池为空则返回null表示需要溢出
+     * 分配整数临时寄存器，如果池为空则返回null表示需要溢出
      */
     public Register allocateTempRegister() {
         if (tempAvaiableRegisterList.isEmpty()) {
@@ -109,12 +155,37 @@ public class RegisterAllocator {
         return item;
     }
 
+    /**
+     * 分配浮点数临时寄存器，如果池为空则返回null表示需要溢出
+     */
+    public Register allocateFloatTempRegister() {
+        if (tempFloatAvaiableRegisterList.isEmpty()) {
+            // 返回null表示需要溢出
+            return null;
+        }
+        Register item = tempFloatAvaiableRegisterList.iterator().next();
+        tempFloatAvaiableRegisterList.remove(item);
+        allocatedFloatTempRegisters.add(item); // 记录已分配
+        return item;
+    }
+
+    /**
+     * 根据类型分配临时寄存器
+     */
+    public Register allocateTempRegister(boolean isFloat) {
+        if (isFloat) {
+            return allocateFloatTempRegister();
+        } else {
+            return allocateTempRegister();
+        }
+    }
+
     public Set<Register> getAllocatedTempRegisters() {
         return allocatedTempRegisters;
     }
 
     /**
-     * 获取需要溢出的寄存器（使用轮询策略，公平地选择寄存器）
+     * 获取需要溢出的整数寄存器（使用轮询策略，公平地选择寄存器）
      */
     public Register getRegisterToSpill(TempRegisterAllocationContext context) {
         if (allocatedTempRegisters.isEmpty()) {
@@ -140,6 +211,47 @@ public class RegisterAllocator {
                 "Fair spill strategy: selected " + selectedReg.name() + " (round " + spillRoundRobinCounter + ")");
 
         return selectedReg;
+    }
+
+    /**
+     * 获取需要溢出的浮点数寄存器（使用轮询策略，公平地选择寄存器）
+     */
+    public Register getFloatRegisterToSpill(TempRegisterAllocationContext context) {
+        if (allocatedFloatTempRegisters.isEmpty()) {
+            throw new IllegalStateException("no allocated float temp register to spill");
+        }
+
+        // 将已分配的浮点数寄存器转换为数组，以便进行轮询
+        Set<Register> pendingToSpill = new HashSet<Register>();
+        pendingToSpill.addAll(allocatedFloatTempRegisters);
+        pendingToSpill.removeAll(context.getAllocatedRegisters());
+        Register[] allocatedArray = pendingToSpill.toArray(new Register[0]);
+        if (allocatedArray.length == 0) {
+            throw new IllegalStateException("no float register to spill");
+        }
+
+        // 使用轮询策略选择寄存器
+        Register selectedReg = allocatedArray[spillRoundRobinCounter % allocatedArray.length];
+
+        // 更新轮询计数器
+        spillRoundRobinCounter++;
+
+        System.err.println(
+                "Fair float spill strategy: selected " + selectedReg.name() + " (round " + spillRoundRobinCounter
+                        + ")");
+
+        return selectedReg;
+    }
+
+    /**
+     * 根据类型获取需要溢出的寄存器
+     */
+    public Register getRegisterToSpill(TempRegisterAllocationContext context, boolean isFloat) {
+        if (isFloat) {
+            return getFloatRegisterToSpill(context);
+        } else {
+            return getRegisterToSpill(context);
+        }
     }
 
     /**
@@ -190,16 +302,37 @@ public class RegisterAllocator {
 
     public void releaseTempRegister(Register register) {
         boolean valid = false;
+        boolean isFloat = false;
+
+        // 检查是否为整数临时寄存器
         for (Register totalTempRegister : totalTempRegisters) {
             if (totalTempRegister.name().equals(register.name())) {
                 valid = true;
+                isFloat = false;
                 break;
             }
         }
+
+        // 检查是否为浮点数临时寄存器
+        if (!valid) {
+            for (Register totalFloatTempRegister : totalFloatTempRegisters) {
+                if (totalFloatTempRegister.name().equals(register.name())) {
+                    valid = true;
+                    isFloat = true;
+                    break;
+                }
+            }
+        }
+
         if (valid && !hasSpillHistory(register)) {
-            System.err.println("releaseTempRegister item at " + register.name());
-            allocatedTempRegisters.remove(register); // 从已分配列表中移除
-            tempAvaiableRegisterList.add(register);
+            System.err.println("releaseTempRegister item at " + register.name() + " (float: " + isFloat + ")");
+            if (isFloat) {
+                allocatedFloatTempRegisters.remove(register); // 从已分配列表中移除
+                tempFloatAvaiableRegisterList.add(register);
+            } else {
+                allocatedTempRegisters.remove(register); // 从已分配列表中移除
+                tempAvaiableRegisterList.add(register);
+            }
         } else if (valid && hasSpillHistory(register)) {
             System.err.println("releaseTempRegister skipped for " + register.name() + " (has spill history)");
         }
@@ -218,6 +351,18 @@ public class RegisterAllocator {
         spillOffsets.clear();
         tempAvaiableRegisterList.clear();
         tempAvaiableRegisterList.addAll(Arrays.asList(totalTempRegisters));
+
+        // 重新初始化浮点数临时寄存器池
+        tempFloatAvaiableRegisterList.clear();
+        tempFloatAvaiableRegisterList.addAll(Arrays.asList(totalFloatTempRegisters));
+        allocatedFloatTempRegisters.clear();
+
+        // 重新初始化浮点数寄存器池
+        availableFloatCalleeSaved.clear();
+        availableFloatCalleeSaved.addAll(Arrays.asList(FLOAT_CALLEE_SAVED));
+        availableFloatCallerSaved.clear();
+        availableFloatCallerSaved.addAll(Arrays.asList(FLOAT_CALLER_SAVED));
+
         spillSlotCount = 0;
         List<Stmt> statements = func.ir();
         int size = estimateSpillOffset(func);
@@ -442,6 +587,18 @@ public class RegisterAllocator {
     }
 
     /**
+     * 检查变量是否为浮点数类型
+     */
+    private boolean isFloatVariable(Entity entity) {
+        if (entity instanceof DefinedVariable) {
+            return entity.type().isFloat();
+        } else if (entity instanceof Parameter) {
+            return entity.type().isFloat();
+        }
+        return false;
+    }
+
+    /**
      * 分配寄存器
      */
     /**
@@ -505,13 +662,27 @@ public class RegisterAllocator {
     private Register forceAllocateWithSpill(LifeRange newRange) {
         Set<Register> candidateRegisters = new LinkedHashSet<>();
 
-        // 确定候选寄存器池
-        if (newRange.crossesCall) {
-            candidateRegisters.addAll(Arrays.asList(CALLEE_SAVED));
-            candidateRegisters.addAll(Arrays.asList(CALLER_SAVED));
+        // 根据变量类型确定候选寄存器池
+        boolean isFloat = isFloatVariable(newRange.entity);
+
+        if (isFloat) {
+            // 浮点数变量使用浮点数寄存器
+            if (newRange.crossesCall) {
+                candidateRegisters.addAll(Arrays.asList(FLOAT_CALLEE_SAVED));
+                candidateRegisters.addAll(Arrays.asList(FLOAT_CALLER_SAVED));
+            } else {
+                candidateRegisters.addAll(Arrays.asList(FLOAT_CALLER_SAVED));
+                candidateRegisters.addAll(Arrays.asList(FLOAT_CALLEE_SAVED));
+            }
         } else {
-            candidateRegisters.addAll(Arrays.asList(CALLER_SAVED));
-            candidateRegisters.addAll(Arrays.asList(CALLEE_SAVED));
+            // 整数变量使用整数寄存器
+            if (newRange.crossesCall) {
+                candidateRegisters.addAll(Arrays.asList(CALLEE_SAVED));
+                candidateRegisters.addAll(Arrays.asList(CALLER_SAVED));
+            } else {
+                candidateRegisters.addAll(Arrays.asList(CALLER_SAVED));
+                candidateRegisters.addAll(Arrays.asList(CALLEE_SAVED));
+            }
         }
 
         // 对于每个候选寄存器，尝试通过溢出多个变量来释放它
@@ -707,6 +878,11 @@ public class RegisterAllocator {
                 return true;
             }
         }
+        for (Register floatCallerSaved : FLOAT_CALLER_SAVED) {
+            if (reg.name().equals(floatCallerSaved.name())) {
+                return true;
+            }
+        }
         return false;
     }
 
@@ -719,15 +895,18 @@ public class RegisterAllocator {
             return null;
         }
 
+        // 根据变量类型获取候选寄存器
+        Set<Register> candidateRegisters = getAllCandidateRegisters(entity);
+
         // 首先尝试直接分配
-        Register reg = findAvailableRegister(range, getAllCandidateRegisters());
+        Register reg = findAvailableRegister(range, candidateRegisters);
         if (reg != null) {
             registerMap.put(entity, reg);
             return reg;
         }
 
         // 尝试通过溢出获得寄存器
-        reg = findRegisterWithSpill(range, getAllCandidateRegisters());
+        reg = findRegisterWithSpill(range, candidateRegisters);
         if (reg != null) {
             registerMap.put(entity, reg);
             return reg;
@@ -739,7 +918,26 @@ public class RegisterAllocator {
     }
 
     /**
-     * 获取所有候选寄存器
+     * 获取所有候选寄存器（根据变量类型）
+     */
+    private Set<Register> getAllCandidateRegisters(Entity entity) {
+        Set<Register> allRegisters = new LinkedHashSet<>();
+
+        if (isFloatVariable(entity)) {
+            // 浮点数变量使用浮点数寄存器
+            allRegisters.addAll(Arrays.asList(FLOAT_CALLER_SAVED));
+            allRegisters.addAll(Arrays.asList(FLOAT_CALLEE_SAVED));
+        } else {
+            // 整数变量使用整数寄存器
+            allRegisters.addAll(Arrays.asList(CALLER_SAVED));
+            allRegisters.addAll(Arrays.asList(CALLEE_SAVED));
+        }
+
+        return allRegisters;
+    }
+
+    /**
+     * 获取所有候选寄存器（兼容旧接口）
      */
     private Set<Register> getAllCandidateRegisters() {
         Set<Register> allRegisters = new LinkedHashSet<>();
@@ -843,8 +1041,14 @@ public class RegisterAllocator {
     public List<Register> getAllocatedRegisterOrderedList() {
         return registerMap.values().stream()
                 .filter(register -> {
+                    // 检查是否为callee-saved寄存器（整数或浮点数）
                     for (Register calleeSaved : CALLEE_SAVED) {
                         if (register.name().equals(calleeSaved.name())) {
+                            return true;
+                        }
+                    }
+                    for (Register floatCalleeSaved : FLOAT_CALLEE_SAVED) {
+                        if (register.name().equals(floatCalleeSaved.name())) {
                             return true;
                         }
                     }
@@ -854,12 +1058,17 @@ public class RegisterAllocator {
     }
 
     /**
-     * 获取所有callee-saved寄存器
+     * 获取所有callee-saved寄存器（整数和浮点数）
      */
     public Set<net.loveruby.cflat.asm.Register> getCalleeSavedRegisters() {
         Set<net.loveruby.cflat.asm.Register> used = new HashSet<>();
         for (Register reg : CALLEE_SAVED) {
             if (!availableCalleeSaved.contains(reg)) {
+                used.add(reg);
+            }
+        }
+        for (Register reg : FLOAT_CALLEE_SAVED) {
+            if (!availableFloatCalleeSaved.contains(reg)) {
                 used.add(reg);
             }
         }
@@ -908,16 +1117,32 @@ public class RegisterAllocator {
     private Register findReusableRegister(LifeRange newRange) {
         Set<Register> candidateRegisters = new LinkedHashSet<>();
 
-        // 1. 确定优先的候选寄存器池
-        if (newRange.crossesCall) {
-            // 跨调用的变量：不使用x1-x7，只使用callee-saved和caller-saved
-            candidateRegisters.addAll(Arrays.asList(CALLEE_SAVED));
-            candidateRegisters.addAll(Arrays.asList(CALLER_SAVED));
+        // 根据变量类型选择寄存器池
+        boolean isFloat = isFloatVariable(newRange.entity);
+
+        if (isFloat) {
+            // 浮点数变量使用浮点数寄存器
+            if (newRange.crossesCall) {
+                // 跨调用的浮点数变量：使用callee-saved浮点数寄存器
+                candidateRegisters.addAll(Arrays.asList(FLOAT_CALLEE_SAVED));
+                candidateRegisters.addAll(Arrays.asList(FLOAT_CALLER_SAVED));
+            } else {
+                // 不跨调用的浮点数变量：优先使用caller-saved，然后callee-saved
+                candidateRegisters.addAll(Arrays.asList(FLOAT_CALLER_SAVED));
+                candidateRegisters.addAll(Arrays.asList(FLOAT_CALLEE_SAVED));
+            }
         } else {
-            // 不跨调用的变量：优先使用x1-x7，然后caller-saved，最后callee-saved
-            candidateRegisters.addAll(Arrays.asList(ARGUMENT_REGS));
-            candidateRegisters.addAll(Arrays.asList(CALLER_SAVED));
-            candidateRegisters.addAll(Arrays.asList(CALLEE_SAVED));
+            // 整数变量使用整数寄存器
+            if (newRange.crossesCall) {
+                // 跨调用的变量：不使用x1-x7，只使用callee-saved和caller-saved
+                candidateRegisters.addAll(Arrays.asList(CALLEE_SAVED));
+                candidateRegisters.addAll(Arrays.asList(CALLER_SAVED));
+            } else {
+                // 不跨调用的变量：优先使用x1-x7，然后caller-saved，最后callee-saved
+                candidateRegisters.addAll(Arrays.asList(ARGUMENT_REGS));
+                candidateRegisters.addAll(Arrays.asList(CALLER_SAVED));
+                candidateRegisters.addAll(Arrays.asList(CALLEE_SAVED));
+            }
         }
 
         // 2. 首先尝试直接找到可重用的寄存器
@@ -948,11 +1173,17 @@ public class RegisterAllocator {
                 // 存在冲突：
                 // (1) 生命周期重叠
                 // (2) 或作用域重叠（嵌套或相交）
+                // (3) 或者寄存器类型不匹配（浮点数vs整数）
                 System.err.println("existingRange: [" + existingRange.startPoint + "," + existingRange.endPoint + "]"
                         + " scope: " + existingRange.scope);
                 System.err.println("newRange: [" + newRange.startPoint + "," + newRange.endPoint + "]" + " scope: "
                         + newRange.scope);
-                if (existingRange.overlaps(newRange) || scopesOverlap(existingRange.scope, newRange.scope)) {
+
+                boolean existingIsFloat = isFloatVariable(existingEntity);
+                boolean newIsFloat = isFloatVariable(newRange.entity);
+
+                if (existingRange.overlaps(newRange) || scopesOverlap(existingRange.scope, newRange.scope) ||
+                        existingIsFloat != newIsFloat) {
                     conflict = true;
                     break;
                 }
