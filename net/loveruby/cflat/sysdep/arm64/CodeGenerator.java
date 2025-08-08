@@ -840,33 +840,6 @@ public class CodeGenerator
         return null;
     }
 
-    public Void visit(Int e) {
-        long v = e.value();
-        if (e.type().size() == 4) {
-            assembly.add(new Directive("\tmov\tw0, #" + (v & 0xFFFFFFFFL)));
-            assembly.add(new Directive("\tsxtw\tx0, w0"));
-        } else {
-            materializeImmediate64("x0", v, false);
-        }
-        return null;
-    }
-
-    // 新增方法：将整数常量放到指定寄存器
-    private void visitIntToRegister(Int e, String targetReg) {
-        long v = e.value();
-        if (e.type().size() == 4) {
-            assembly.add(new Directive("\tmov\tw" + targetReg.substring(1) + ", #" + (v & 0xFFFFFFFFL)));
-            assembly.add(new Directive("\tsxtw\t" + targetReg + ", w" + targetReg.substring(1)));
-        } else {
-            materializeImmediate64(targetReg, v, false);
-        }
-    }
-
-    public Void visit(Str e) {
-        assembly.add(new Directive("\tadrp\tx0, " + e.symbol().name() + "@PAGE"));
-        assembly.add(new Directive("\tadd\tx0, x0, " + e.symbol().name() + "@PAGEOFF"));
-        return null;
-    }
 
     /* ====== Helpers ====== */
 
