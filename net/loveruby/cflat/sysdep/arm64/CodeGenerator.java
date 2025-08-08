@@ -1786,6 +1786,7 @@ public class CodeGenerator
 
         // 内存访问
         String targetRegName = targetRegister.name();
+        String target32Name = targetRegister.bit32Name();
 
         // 计算地址到临时寄存器，避免覆盖目标寄存器
         Register temp = allocateTempRegisterWithSpill(context, "mem");
@@ -1795,14 +1796,13 @@ public class CodeGenerator
 
         if (sz == 1) {
             // 读 1 字节并做有符号扩展成 64 位
-            assembly.add(new Directive("\tldrb\tw" + targetRegName.substring(1) + ", " + tempRef));
-            assembly.add(new Directive("\tsxtb\t" + targetRegName + ", w" + targetRegName.substring(1)));
+            assembly.add(new Directive("\tldrb\t" + target32Name + ", " + tempRef));
+            assembly.add(new Directive("\tsxtb\t" + targetRegName + ", " + target32Name));
         } else if (sz == 2) {
-            assembly.add(new Directive("\tldrh\tw" + targetRegName.substring(1) + ", " + tempRef));
-            assembly.add(new Directive("\tsxth\t" + targetRegName + ", w" + targetRegName.substring(1)));
+            assembly.add(new Directive("\tldrh\t" + target32Name + ", " + tempRef));
+            assembly.add(new Directive("\tsxth\t" + targetRegName + ", " + target32Name));
         } else if (sz == 4) {
-            assembly.add(new Directive("\tldr\tw" + targetRegName.substring(1) + ", " + tempRef));
-            assembly.add(new Directive("\tsxtw\t" + targetRegName + ", w" + targetRegName.substring(1)));
+            assembly.add(new Directive("\tldr\t" + target32Name + ", " + tempRef));
         } else if (sz == 8) {
             assembly.add(new Directive("\tldr\t" + targetRegName + ", " + tempRef));
         } else {
