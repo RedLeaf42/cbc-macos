@@ -883,8 +883,7 @@ public class CodeGenerator
                 assembly.add(new Directive("\tldrh\tw0, [" + dst + "]"));
                 assembly.add(new Directive("\tsxth\t" + dst + ", w0"));
             } else if (sz == 4) {
-                assembly.add(new Directive("\tldr\tw0, [" + dst + "]"));
-                assembly.add(new Directive("\tsxtw\t" + dst + ", w0"));
+                assembly.add(new Directive("\tldr\t"+dstRegister.bit32Name() +" [" + dst + "]"));
             } else if (sz == 8) {
                 assembly.add(new Directive("\tldr\t" + dst + ", [" + dst + "]"));
             } else {
