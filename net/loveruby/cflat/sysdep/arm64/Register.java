@@ -51,7 +51,7 @@ public class Register extends net.loveruby.cflat.asm.Register {
     }
 
     public String bit32Name() {
-       return "w"+ name.substring(1);
+        return "w" + name.substring(1);
     }
 
     // ARM64 general purpose registers

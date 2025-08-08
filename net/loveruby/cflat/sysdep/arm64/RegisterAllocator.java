@@ -91,7 +91,7 @@ public class RegisterAllocator {
     private int spillRoundRobinCounter = 0;
 
     public int getSpillSlotCount() {
-        System.err.println("RegisterAllocator getSpillSlotCount: "+spillSlotCount);
+        System.err.println("RegisterAllocator getSpillSlotCount: " + spillSlotCount);
         return spillSlotCount;
     }
 
@@ -148,7 +148,7 @@ public class RegisterAllocator {
     public long getNextSpillOffset() {
         long offset = nextTempSpillOffset;
         nextTempSpillOffset += 8;
-        System.err.println("getNextSpillOffset offset: "+nextTempSpillOffset);
+        System.err.println("getNextSpillOffset offset: " + nextTempSpillOffset);
         return offset;
     }
 
@@ -178,7 +178,7 @@ public class RegisterAllocator {
         if (poppedOffset != null) {
             // 更新最新的spill偏移量
             Stack<Long> stack = registerSpillStack.get(reg);
-            nextTempSpillOffset-=8;
+            nextTempSpillOffset -= 8;
             if (stack != null && !stack.isEmpty()) {
                 tempSpillOffsets.put(reg, stack.peek());
             } else {
@@ -209,10 +209,10 @@ public class RegisterAllocator {
      * 为函数分配寄存器
      */
     public void allocateRegisters(DefinedFunction func,
-                                  Map<Entity, Long> localVarOffsets,
-                                  Map<Entity, Long> paramOffsets,
-                                  List<Variable> globalVariables,
-                                  LocalScope scope) {
+            Map<Entity, Long> localVarOffsets,
+            Map<Entity, Long> paramOffsets,
+            List<Variable> globalVariables,
+            LocalScope scope) {
         variableLocalScopeMap.clear();
         registerMap.clear();
         spillOffsets.clear();

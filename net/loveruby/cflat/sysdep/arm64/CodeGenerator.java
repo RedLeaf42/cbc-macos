@@ -766,9 +766,7 @@ public class CodeGenerator
         if (e instanceof Var) {
             // 对于Var，我们需要读取变量的值，而不是计算变量的地址
             // 因为Var可能存储的是一个地址（比如@tmp0存储&a[0]）
-            loadFromVar((Var) e);
-            if (!"x0".equals(dst))
-                assembly.add(new Directive("\tmov\t" + dst + ", x0"));
+            loadFromVar((Var) e, dst);
             return;
         }
         if (e instanceof Mem) {
@@ -970,118 +968,6 @@ public class CodeGenerator
                     assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@GOTPAGE"));
                     assembly.add(new Directive("\tldr\t" + dst + ", [" + dst + ", " + symbolName + "@GOTPAGEOFF]"));
                 }
-            }
-        }
-    }
-
-    private void loadFromVar(Var v) {
-        Entity ent = v.entity();
-        long sz = v.type().size();
-        if (registerAllocator.isInRegister(ent)) {
-            Register register = registerAllocator.getRegister(ent);
-            assembly.add(new Directive("\tmov\tx0, " + register.name()));
-        } else if (localVarOffsets.containsKey(ent)) {
-            long off = localVarOffsets.get(ent);
-            if (sz == 8) {
-                assembly.add(new Directive("\tldr\tx0, [x29, #" + off + "]"));
-            } else if (sz == 4) {
-                assembly.add(new Directive("\tldr\tw0, [x29, #" + off + "]"));
-                assembly.add(new Directive("\tsxtw\tx0, w0"));
-            } else if (sz == 2) {
-                assembly.add(new Directive("\tldrh\tw0, [x29, #" + off + "]"));
-                assembly.add(new Directive("\tsxth\tx0, w0"));
-            } else if (sz == 1) {
-                assembly.add(new Directive("\tldrb\tw0, [x29, #" + off + "]"));
-                assembly.add(new Directive("\tsxtb\tx0, w0"));
-            } else {
-                errorHandler.error("unsupported load size: " + sz);
-            }
-        } else if (paramOffsets.containsKey(ent)) {
-            long off = paramOffsets.get(ent);
-            // 对于参数，优先从局部变量位置加载（如果存在）
-            if (localVarOffsets.containsKey(ent)) {
-                long localOff = localVarOffsets.get(ent);
-                if (sz == 8) {
-                    assembly.add(new Directive("\tldr\tx0, [x29, #" + localOff + "]"));
-                } else if (sz == 4) {
-                    assembly.add(new Directive("\tldr\tw0, [x29, #" + localOff + "]"));
-                    assembly.add(new Directive("\tsxtw\tx0, w0"));
-                } else if (sz == 2) {
-                    assembly.add(new Directive("\tldrh\tw0, [x29, #" + localOff + "]"));
-                    assembly.add(new Directive("\tsxth\tx0, w0"));
-                } else if (sz == 1) {
-                    assembly.add(new Directive("\tldrb\tw0, [x29, #" + localOff + "]"));
-                    assembly.add(new Directive("\tsxtb\tx0, w0"));
-                } else {
-                    errorHandler.error("unsupported load size: " + sz);
-                }
-            } else {
-                // 在 ARM64 中，前 8 个参数通过寄存器传递
-                // 参数在栈上，从栈加载
-                if (sz == 8) {
-                    assembly.add(new Directive("\tldr\tx0, [x29, #" + off + "]"));
-                } else if (sz == 4) {
-                    assembly.add(new Directive("\tldr\tw0, [x29, #" + off + "]"));
-                    assembly.add(new Directive("\tsxtw\tx0, w0"));
-                } else if (sz == 2) {
-                    assembly.add(new Directive("\tldrh\tw0, [x29, #" + off + "]"));
-                    assembly.add(new Directive("\tsxth\tx0, w0"));
-                } else if (sz == 1) {
-                    assembly.add(new Directive("\tldrb\tw0, [x29, #" + off + "]"));
-                    assembly.add(new Directive("\tsxtb\tx0, w0"));
-                } else {
-                    errorHandler.error("unsupported load size: " + sz);
-                }
-            }
-        } else {
-            // 对于外部符号，根据类型选择重定位方式
-            String symbolName = "_" + ent.name();
-            if (ent.type().isFunction()) {
-                // 检查函数是否在当前编译单元中定义
-                boolean isDefinedInCurrentUnit = false;
-                if (currentIR != null) {
-                    for (DefinedFunction func : currentIR.definedFunctions()) {
-                        if (func.name().equals(ent.name())) {
-                            isDefinedInCurrentUnit = true;
-                            break;
-                        }
-                    }
-                }
-
-                if (options.isPositionIndependent()) {
-                    if (ent.isPrivate() || isDefinedInCurrentUnit) {
-                        // 对于静态函数或在当前编译单元中定义的函数，使用@PAGE/@PAGEOFF重定位
-                        assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
-                        assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
-                    } else {
-                        // 对于外部函数，使用@GOT重定位，加载到x16避免覆盖x0中的参数
-                        assembly.add(new Directive("\tadrp\tx16, " + symbolName + "@GOTPAGE"));
-                        assembly.add(new Directive("\tldr\tx16, [x16, " + symbolName + "@GOTPAGEOFF]"));
-                        assembly.add(new Directive("\tmov\tx0, x16"));
-                    }
-                } else {
-                    // 非PIC模式，使用@PAGE/@PAGEOFF重定位
-                    assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
-                    assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
-                }
-            } else {
-                // 对于外部变量，使用@GOT重定位
-                assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@GOTPAGE"));
-                assembly.add(new Directive("\tldr\tx0, [x0, " + symbolName + "@GOTPAGEOFF]"));
-            }
-            if (sz == 8) {
-                assembly.add(new Directive("\tldr\tx0, [x0]"));
-            } else if (sz == 4) {
-                assembly.add(new Directive("\tldr\tw0, [x0]"));
-                assembly.add(new Directive("\tsxtw\tx0, w0"));
-            } else if (sz == 2) {
-                assembly.add(new Directive("\tldrh\tw0, [x0]"));
-                assembly.add(new Directive("\tsxth\tx0, w0"));
-            } else if (sz == 1) {
-                assembly.add(new Directive("\tldrb\tw0, [x0]"));
-                assembly.add(new Directive("\tsxtb\tx0, w0"));
-            } else {
-                errorHandler.error("unsupported load size: " + sz);
             }
         }
     }
@@ -1433,7 +1319,6 @@ public class CodeGenerator
                 if (e.type().size() == 4) {
                     assembly.add(new Directive(
                             "\tmvn\tw" + targetRegName.substring(1) + ", w" + targetRegName.substring(1)));
-                    assembly.add(new Directive("\tsxtw\t" + targetRegName + ", w" + targetRegName.substring(1)));
                 } else {
                     assembly.add(new Directive("\tmvn\t" + targetRegName + ", " + targetRegName));
                 }
@@ -1499,7 +1384,6 @@ public class CodeGenerator
                 } else if (sz == 4) {
                     // 32位变量：使用32位加载指令，然后有符号扩展到64位
                     assembly.add(new Directive("\tldr\tw" + targetRegName.substring(1) + ", [x29, #" + offset + "]"));
-                    assembly.add(new Directive("\tsxtw\t" + targetRegName + ", w" + targetRegName.substring(1)));
                 } else if (sz == 2) {
                     // 16位变量：使用16位加载指令，然后有符号扩展到64位
                     assembly.add(new Directive("\tldrh\tw" + targetRegName.substring(1) + ", [x29, #" + offset + "]"));
@@ -1874,24 +1758,114 @@ public class CodeGenerator
         releaseTempRegisterWithRestore(rightReg, context);
         releaseTempRegisterWithRestore(leftReg, context);
     }
-
-    private void loadFromVar(Var v, String targetReg) {
-        Entity entity = v.entity();
-
-        if (localVarOffsets.containsKey(entity)) {
-            long off = localVarOffsets.get(entity);
-            if (off >= 0) {
-                assembly.add(new Directive("\tldr\t" + targetReg + ", [x29, #" + off + "]"));
+    private void loadFromVar(Var v, String targetRegister) {
+        Entity ent = v.entity();
+        long sz = v.type().size();
+        if (registerAllocator.isInRegister(ent)) {
+            Register register = registerAllocator.getRegister(ent);
+            assembly.add(new Directive("\tmov\tx0, " + register.name()));
+        } else if (localVarOffsets.containsKey(ent)) {
+            long off = localVarOffsets.get(ent);
+            if (sz == 8) {
+                assembly.add(new Directive("\tldr\tx0, [x29, #" + off + "]"));
+            } else if (sz == 4) {
+                assembly.add(new Directive("\tldr\tw0, [x29, #" + off + "]"));
+            } else if (sz == 2) {
+                assembly.add(new Directive("\tldrh\tw0, [x29, #" + off + "]"));
+                assembly.add(new Directive("\tsxth\tx0, w0"));
+            } else if (sz == 1) {
+                assembly.add(new Directive("\tldrb\tw0, [x29, #" + off + "]"));
+                assembly.add(new Directive("\tsxtb\tx0, w0"));
             } else {
-                assembly.add(new Directive("\tldr\t" + targetReg + ", [x29, #" + (-off) + "]"));
+                errorHandler.error("unsupported load size: " + sz);
             }
-        } else if (paramOffsets.containsKey(entity)) {
-            long off = paramOffsets.get(entity);
-            assembly.add(new Directive("\tldr\t" + targetReg + ", [x29, #" + off + "]"));
+        } else if (paramOffsets.containsKey(ent)) {
+            long off = paramOffsets.get(ent);
+            // 对于参数，优先从局部变量位置加载（如果存在）
+            if (localVarOffsets.containsKey(ent)) {
+                long localOff = localVarOffsets.get(ent);
+                if (sz == 8) {
+                    assembly.add(new Directive("\tldr\tx0, [x29, #" + localOff + "]"));
+                } else if (sz == 4) {
+                    assembly.add(new Directive("\tldr\tw0, [x29, #" + localOff + "]"));
+                } else if (sz == 2) {
+                    assembly.add(new Directive("\tldrh\tw0, [x29, #" + localOff + "]"));
+                    assembly.add(new Directive("\tsxth\tx0, w0"));
+                } else if (sz == 1) {
+                    assembly.add(new Directive("\tldrb\tw0, [x29, #" + localOff + "]"));
+                    assembly.add(new Directive("\tsxtb\tx0, w0"));
+                } else {
+                    errorHandler.error("unsupported load size: " + sz);
+                }
+            } else {
+                // 在 ARM64 中，前 8 个参数通过寄存器传递
+                // 参数在栈上，从栈加载
+                if (sz == 8) {
+                    assembly.add(new Directive("\tldr\tx0, [x29, #" + off + "]"));
+                } else if (sz == 4) {
+                    assembly.add(new Directive("\tldr\tw0, [x29, #" + off + "]"));
+                } else if (sz == 2) {
+                    assembly.add(new Directive("\tldrh\tw0, [x29, #" + off + "]"));
+                    assembly.add(new Directive("\tsxth\tx0, w0"));
+                } else if (sz == 1) {
+                    assembly.add(new Directive("\tldrb\tw0, [x29, #" + off + "]"));
+                    assembly.add(new Directive("\tsxtb\tx0, w0"));
+                } else {
+                    errorHandler.error("unsupported load size: " + sz);
+                }
+            }
         } else {
-            // 全局变量
-            addrOfEntityInto(entity, targetReg);
-            assembly.add(new Directive("\tldr\t" + targetReg + ", [" + targetReg + "]"));
+            // 对于外部符号，根据类型选择重定位方式
+            String symbolName = "_" + ent.name();
+            if (ent.type().isFunction()) {
+                // 检查函数是否在当前编译单元中定义
+                boolean isDefinedInCurrentUnit = false;
+                if (currentIR != null) {
+                    for (DefinedFunction func : currentIR.definedFunctions()) {
+                        if (func.name().equals(ent.name())) {
+                            isDefinedInCurrentUnit = true;
+                            break;
+                        }
+                    }
+                }
+
+                if (options.isPositionIndependent()) {
+                    if (ent.isPrivate() || isDefinedInCurrentUnit) {
+                        // 对于静态函数或在当前编译单元中定义的函数，使用@PAGE/@PAGEOFF重定位
+                        assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
+                        assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+                    } else {
+                        // 对于外部函数，使用@GOT重定位，加载到x16避免覆盖x0中的参数
+                        assembly.add(new Directive("\tadrp\tx16, " + symbolName + "@GOTPAGE"));
+                        assembly.add(new Directive("\tldr\tx16, [x16, " + symbolName + "@GOTPAGEOFF]"));
+                        assembly.add(new Directive("\tmov\tx0, x16"));
+                    }
+                } else {
+                    // 非PIC模式，使用@PAGE/@PAGEOFF重定位
+                    assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
+                    assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
+                }
+            } else {
+                // 对于外部变量，使用@GOT重定位
+                assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@GOTPAGE"));
+                assembly.add(new Directive("\tldr\tx0, [x0, " + symbolName + "@GOTPAGEOFF]"));
+            }
+            if (sz == 8) {
+                assembly.add(new Directive("\tldr\tx0, [x0]"));
+            } else if (sz == 4) {
+                assembly.add(new Directive("\tldr\tw0, [x0]"));
+            } else if (sz == 2) {
+                assembly.add(new Directive("\tldrh\tw0, [x0]"));
+                assembly.add(new Directive("\tsxth\tx0, w0"));
+            } else if (sz == 1) {
+                assembly.add(new Directive("\tldrb\tw0, [x0]"));
+                assembly.add(new Directive("\tsxtb\tx0, w0"));
+            } else {
+                errorHandler.error("unsupported load size: " + sz);
+            }
+        }
+        if (!targetRegister.equals("x0")) {
+            assembly.add(new Directive("\tmov "+targetRegister+", x0"));
         }
     }
 
