@@ -451,7 +451,7 @@ public class CodeGenerator
             spillOffset = alignedFrameSize;
             alignedFrameSize += registerAllocator.getSpillSlotCount() * 8L;
             alignedFrameSize = (alignedFrameSize + 15) & ~15;
-            System.err.println("genPrologue " + alignedFrameSize + "spillOffset: "+spillOffset);
+            System.err.println("genPrologue " + alignedFrameSize + "spillOffset: " + spillOffset);
             assembly.add(new Directive("\tsub\tsp, sp, #" + alignedFrameSize));
         }
         // 保存被使用的寄存器
@@ -839,7 +839,6 @@ public class CodeGenerator
         }
         return null;
     }
-
 
     /* ====== Helpers ====== */
 
@@ -1407,18 +1406,18 @@ public class CodeGenerator
         Register[][] registerPairs = {
                 { Register.X9, Register.X10 },
                 { Register.X11, Register.X12 },
-//                { Register.X13, Register.X14 },
-//                { Register.X15, Register.X16 }
+                // { Register.X13, Register.X14 },
+                // { Register.X15, Register.X16 }
         };
 
         for (Register[] pair : registerPairs) {
             boolean shouldSavePair = true;
-//             for (Register reg : pair) {
-//             if (usedCallerSaved.contains(reg)) {
-//             shouldSavePair = true;
-//             break;
-//             }
-//             }
+            // for (Register reg : pair) {
+            // if (usedCallerSaved.contains(reg)) {
+            // shouldSavePair = true;
+            // break;
+            // }
+            // }
 
             if (shouldSavePair) {
                 assembly.add(new Directive("\tstp\t" + pair[0] + ", " + pair[1] + ", [sp, #-16]!"));
@@ -1432,8 +1431,8 @@ public class CodeGenerator
     private void restoreCallerSavedRegisters(Set<Register> usedCallerSaved) {
         // 定义caller-saved寄存器的恢复顺序（按对恢复，保持16字节对齐）
         Register[][] registerPairs = {
-//                { Register.X15, Register.X16 },
-//                { Register.X13, Register.X14 },
+                // { Register.X15, Register.X16 },
+                // { Register.X13, Register.X14 },
                 { Register.X11, Register.X12 },
                 { Register.X9, Register.X10 }
         };
@@ -1631,8 +1630,8 @@ public class CodeGenerator
         String targetRegName = targetRegister.name();
         long v = e.value();
         if (e.type().size() == 4) {
+            // 32位整数：直接使用32位寄存器，不进行扩展
             assembly.add(new Directive("\tmov\tw" + targetRegName.substring(1) + ", #" + (v & 0xFFFFFFFFL)));
-            assembly.add(new Directive("\tsxtw\t" + targetRegName + ", w" + targetRegName.substring(1)));
         } else {
             materializeImmediate64(targetRegName, v, false);
         }
