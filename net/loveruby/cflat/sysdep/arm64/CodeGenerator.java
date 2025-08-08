@@ -316,7 +316,7 @@ public class CodeGenerator
         registerAllocator.allocateRegisters(func, paramOffsets, localVarOffsets, currentIR.allGlobalVariables(),
                 func.lvarScope());
         long allocatedRegisterSize = registerAllocator.getAllocatedRegisterOrderedList().size() * 8L;
-        System.out.println("frameSize original " + frameSize + " registerSize=" + allocatedRegisterSize);
+        System.err.println("frameSize original " + frameSize + " registerSize=" + allocatedRegisterSize);
         frameSize += allocatedRegisterSize;
         /*
          * 调整偏移量
@@ -446,10 +446,12 @@ public class CodeGenerator
         if (frameSize > 0) {
             // 确保frameSize是16字节对齐的
             long alignedFrameSize = (frameSize + 15) & ~15;
+            // spillOffset必须是一个可以安全开始的存储点，换言之它必须和之前的alignedFrameSize必须有8字节的差距
+            alignedFrameSize += 8; // 为什么要偏移8，是因为这个点才是安全的点，不会覆盖之前的数据,因为spillOffset是从0开始计算的
             spillOffset = alignedFrameSize;
             alignedFrameSize += registerAllocator.getSpillSlotCount() * 8L;
             alignedFrameSize = (alignedFrameSize + 15) & ~15;
-            System.err.println("genPrologue " + alignedFrameSize);
+            System.err.println("genPrologue " + alignedFrameSize + "spillOffset: "+spillOffset);
             assembly.add(new Directive("\tsub\tsp, sp, #" + alignedFrameSize));
         }
         // 保存被使用的寄存器

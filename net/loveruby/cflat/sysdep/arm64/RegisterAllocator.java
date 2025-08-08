@@ -30,10 +30,7 @@ public class RegisterAllocator {
             net.loveruby.cflat.sysdep.arm64.Register.X9,
             net.loveruby.cflat.sysdep.arm64.Register.X10,
             net.loveruby.cflat.sysdep.arm64.Register.X11,
-            // net.loveruby.cflat.sysdep.arm64.Register.X12,
-            // net.loveruby.cflat.sysdep.arm64.Register.X13,
-            net.loveruby.cflat.sysdep.arm64.Register.X14,
-            net.loveruby.cflat.sysdep.arm64.Register.X15
+            net.loveruby.cflat.sysdep.arm64.Register.X12,
     };
 
     // 新增：参数寄存器（x1-x7），只用于不跨调用的变量
@@ -71,8 +68,9 @@ public class RegisterAllocator {
     private final Map<Entity, LifeRange> lifeRanges = new HashMap<>();
     /* 设计这个的目的是为了将寄存器分配逻辑完全放到CodeGenerator中，CodeGenerator不再保留任何硬编码代码 */
     private final Register[] totalTempRegisters = {
-             Register.X12,
             Register.X13,
+            Register.X14,
+            Register.X15,
             Register.X16
     };
     private final Set<Register> tempAvaiableRegisterList = new LinkedHashSet<>(Arrays.asList(
@@ -93,6 +91,7 @@ public class RegisterAllocator {
     private int spillRoundRobinCounter = 0;
 
     public int getSpillSlotCount() {
+        System.err.println("RegisterAllocator getSpillSlotCount: "+spillSlotCount);
         return spillSlotCount;
     }
 
@@ -149,6 +148,7 @@ public class RegisterAllocator {
     public long getNextSpillOffset() {
         long offset = nextTempSpillOffset;
         nextTempSpillOffset += 8;
+        System.err.println("getNextSpillOffset offset: "+nextTempSpillOffset);
         return offset;
     }
 
@@ -178,6 +178,7 @@ public class RegisterAllocator {
         if (poppedOffset != null) {
             // 更新最新的spill偏移量
             Stack<Long> stack = registerSpillStack.get(reg);
+            nextTempSpillOffset-=8;
             if (stack != null && !stack.isEmpty()) {
                 tempSpillOffsets.put(reg, stack.peek());
             } else {
@@ -208,10 +209,10 @@ public class RegisterAllocator {
      * 为函数分配寄存器
      */
     public void allocateRegisters(DefinedFunction func,
-            Map<Entity, Long> localVarOffsets,
-            Map<Entity, Long> paramOffsets,
-            List<Variable> globalVariables,
-            LocalScope scope) {
+                                  Map<Entity, Long> localVarOffsets,
+                                  Map<Entity, Long> paramOffsets,
+                                  List<Variable> globalVariables,
+                                  LocalScope scope) {
         variableLocalScopeMap.clear();
         registerMap.clear();
         spillOffsets.clear();
@@ -1138,7 +1139,9 @@ public class RegisterAllocator {
             }
         });
         return size.get();
-    };
+    }
+
+    ;
 
     int estimateSpillOffset(Assign stmt) {
         int right = estimateSpillOffset(stmt.rhs());
