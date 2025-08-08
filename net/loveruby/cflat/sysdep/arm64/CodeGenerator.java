@@ -1434,18 +1434,18 @@ public class CodeGenerator
         Register[][] registerPairs = {
                 { Register.X9, Register.X10 },
                 { Register.X11, Register.X12 },
-                { Register.X13, Register.X14 },
-                { Register.X15, Register.X16 }
+//                { Register.X13, Register.X14 },
+//                { Register.X15, Register.X16 }
         };
 
         for (Register[] pair : registerPairs) {
             boolean shouldSavePair = true;
-            // for (Register reg : pair) {
-            // if (usedCallerSaved.contains(reg)) {
-            // shouldSavePair = true;
-            // break;
-            // }
-            // }
+//             for (Register reg : pair) {
+//             if (usedCallerSaved.contains(reg)) {
+//             shouldSavePair = true;
+//             break;
+//             }
+//             }
 
             if (shouldSavePair) {
                 assembly.add(new Directive("\tstp\t" + pair[0] + ", " + pair[1] + ", [sp, #-16]!"));
@@ -1459,8 +1459,8 @@ public class CodeGenerator
     private void restoreCallerSavedRegisters(Set<Register> usedCallerSaved) {
         // 定义caller-saved寄存器的恢复顺序（按对恢复，保持16字节对齐）
         Register[][] registerPairs = {
-                { Register.X15, Register.X16 },
-                { Register.X13, Register.X14 },
+//                { Register.X15, Register.X16 },
+//                { Register.X13, Register.X14 },
                 { Register.X11, Register.X12 },
                 { Register.X9, Register.X10 }
         };
