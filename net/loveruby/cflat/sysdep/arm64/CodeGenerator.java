@@ -739,37 +739,6 @@ public class CodeGenerator
         return null;
     }
 
-    public Void visit(Uni e) {
-        // 使用RegisterAwareVisitor，计算到x0
-        e.expr().accept(this, Register.X0);
-        switch (e.op()) {
-            case UMINUS:
-                assembly.add(new Directive("\tneg\tx0, x0"));
-                break;
-            case BIT_NOT:
-                if (e.type().size() == 4) {
-                    assembly.add(new Directive("\tmvn\tw0, w0"));
-                    assembly.add(new Directive("\tsxtw\tx0, w0"));
-                } else {
-                    assembly.add(new Directive("\tmvn\tx0, x0"));
-                }
-                break;
-            case NOT:
-                assembly.add(new Directive("\tcmp\tx0, #0"));
-                assembly.add(new Directive("\tcset\tx0, eq"));
-                break;
-            case S_CAST:
-                // nothing, IR already sign-extended where needed
-                break;
-            case U_CAST:
-                if (e.expr().type().size() == 4 && e.type().size() == 8) {
-                    assembly.add(new Directive("\tuxtw\tx0, w0"));
-                }
-                break;
-        }
-        return null;
-    }
-
     public Void visit(Mem e) {
         // 计算地址到 x11，避免覆盖 x0 里的中间值
         TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
