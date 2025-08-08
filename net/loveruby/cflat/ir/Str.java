@@ -5,6 +5,7 @@ import net.loveruby.cflat.asm.Operand;
 import net.loveruby.cflat.asm.ImmediateValue;
 import net.loveruby.cflat.asm.MemoryReference;
 import net.loveruby.cflat.asm.Symbol;
+import net.loveruby.cflat.sysdep.arm64.Register;
 
 public class Str extends Expr {
     protected ConstantEntry entry;
@@ -36,6 +37,16 @@ public class Str extends Expr {
 
     public <S,E> E accept(IRVisitor<S,E> visitor) {
         return visitor.visit(this);
+    }
+
+    /**
+     * 接受寄存器感知访问者
+     * @param visitor 寄存器感知访问者
+     * @param targetRegister 目标寄存器
+     * @return 访问结果
+     */
+    public <S,E> E accept(RegisterAwareVisitor<S,E> visitor, Register targetRegister) {
+        return visitor.visit(this, targetRegister);
     }
 
     protected void _dump(Dumper d) {

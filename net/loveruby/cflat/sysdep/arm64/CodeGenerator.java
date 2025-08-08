@@ -16,11 +16,13 @@ import java.util.stream.Collectors;
  * - Prologue/Epilogue use push/pop pattern to avoid stp/ldp offset overflow
  * - Address calculation no longer trashes x0 in the middle
  */
-public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, IRVisitor<Void, Void> {
+public class CodeGenerator
+        implements net.loveruby.cflat.sysdep.CodeGenerator, RegisterAwareVisitor<Void, Void> {
 
     /* ====== Config ====== */
     private final AssemblyCode assembly;
     private final ErrorHandler errorHandler;
+    @SuppressWarnings("FieldCanBeLocal")
     private final net.loveruby.cflat.asm.Type naturalType;
     private final net.loveruby.cflat.sysdep.CodeGeneratorOptions options;
 
@@ -41,9 +43,9 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     private final Map<Entity, Long> paramOffsets = new HashMap<>();
     private final List<DefinedVariable> staticLocals = new ArrayList<>();
     // 寄存器分配器
-    private RegisterAllocator registerAllocator;
-    private Map<Entity, net.loveruby.cflat.asm.Register> registerMap = new HashMap<>();
-    private Map<Entity, Long> spillOffsets = new HashMap<>();
+    private final RegisterAllocator registerAllocator;
+    private final Map<Entity, net.loveruby.cflat.asm.Register> registerMap = new HashMap<>();
+    private final Map<Entity, Long> spillOffsets = new HashMap<>();
 
     // 当前正在处理的语句（用于活跃变量分析）
     private Stmt currentStmt;
@@ -243,9 +245,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 String s = ((net.loveruby.cflat.ast.StringLiteralNode) init).value();
                 ConstantEntry ce = ir.constantTable().intern(s);
                 assembly.add(new Directive("\t.quad\t" + ce.symbol().toSource()));
-            } else if (init instanceof net.loveruby.cflat.ir.Str) {
-                Symbol cs = ((net.loveruby.cflat.ir.Str) init).entry().symbol();
-                assembly.add(new Directive("\t.quad\t" + cs.toSource()));
             } else {
                 assembly.add(new Directive("\t.quad\t0"));
             }
@@ -341,13 +340,12 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         registerAllocator.adjustSpill(paramOffsets, localVarOffsets);
         // 获取分配结果
         for (DefinedVariable var : func.localVariables()) {
-            Entity entity = var;
-            if (registerAllocator.isInRegister(entity)) {
-                System.err.println("InRegister " + entity.name());
-                registerMap.put(entity, registerAllocator.getRegister(entity));
-            } else if (registerAllocator.isSpilled(entity)) {
-                System.err.println("InSpill " + entity.name());
-                spillOffsets.put(entity, registerAllocator.getSpillOffset(entity));
+            if (registerAllocator.isInRegister(var)) {
+                System.err.println("InRegister " + var.name());
+                registerMap.put(var, registerAllocator.getRegister(var));
+            } else if (registerAllocator.isSpilled(var)) {
+                System.err.println("InSpill " + var.name());
+                spillOffsets.put(var, registerAllocator.getSpillOffset(var));
             }
         }
 
@@ -373,7 +371,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         genPrologue();
         for (Stmt s : func.ir()) {
             currentStmt = s;
-            s.accept(this);
+            visit(s);
         }
         assembly.add(new Label(new NamedSymbol(".L" + func.name() + "_epilogue")));
         genEpilogue();
@@ -484,7 +482,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
     /* ====== IR Visitor ====== */
 
-    @Override
     public Void visit(Call e) {
         boolean isVar = e.isStaticCall() &&
                 e.function().type().getFunctionType().isVararg();
@@ -509,7 +506,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         }
 
         int stackArgs = Math.max(0, total - ARG_REGS.length);
-        int shadow = isVar ? 8 * (total-fixed) : 0;
+        int shadow = isVar ? 8 * (total - fixed) : 0;
         int temp = total * 8;
         int block = shadow + stackArgs * 8 + temp;
         block = (block + 15) & ~15;
@@ -521,7 +518,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
         // Pass1: L->R
         for (int i = 0; i < total; ++i) {
-            args.get(i).accept(this); // x0
+            args.get(i).accept(this, Register.X0); // 计算到x0
             assembly.add(new Directive("\tstr\tx0, [sp, #" + (tempBase + i * 8L) + "]"));
         }
         TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
@@ -566,13 +563,13 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             assembly.add(new Directive("\tbl\t" + e.function().callingSymbol().toSource()));
         } else {
             // 对于间接函数调用，需要将函数地址加载到不同的寄存器，避免覆盖x0中的参数
-            e.expr().accept(this); // callee -> x0
+            e.expr().accept(this, Register.X0); // callee -> x0
             tempRegister = allocateTempRegisterWithSpill(context, "tmp pointer");
             assembly.add(new Directive("\tmov\t" + tempRegister + ", x0")); // 将函数地址移动到CALL_TMP
             // 现在需要将第一个参数重新加载到x0
             // todo 严格来说这里是有语法错误的，这里会导致第一个表达式执行两次
             if (!e.args().isEmpty()) {
-                e.args().get(0).accept(this); // 重新加载第一个参数到x0
+                e.args().get(0).accept(this, Register.X0); // 重新加载第一个参数到x0
             }
             assembly.add(new Directive("\tblr\t" + tempRegister)); // 使用CALL_TMP调用函数
             releaseTempRegisterWithRestore(tempRegister, context);
@@ -593,8 +590,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
                 "Assign");
         // 检查LHS是否是Var类型，且已分配寄存器
-        if (s.lhs() instanceof Var) {
-            Var var = (Var) s.lhs();
+        if (s.lhs() instanceof Var var) {
             Entity ent = var.entity();
             net.loveruby.cflat.asm.Register reg = registerMap.get(ent);
 
@@ -602,19 +598,15 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 // 变量在寄存器中，直接将RHS的结果放到目标寄存器
                 System.err.println("Storing to " + ent.name() + " in register " + reg);
 
-                // 特殊处理：如果RHS是Int，直接放到目标寄存器
-                if (s.rhs() instanceof Int) {
-                    visitIntToRegister((Int) s.rhs(), reg.toString());
-                } else {
-                    // 其他情况，先计算到x0，然后移动到目标寄存器
-                    s.rhs().accept(this);
-                    assembly.add(new Directive("\tmov\t" + reg + ", x0"));
-                }
+                // 使用RegisterAwareVisitor，直接将RHS计算到目标寄存器
+                Register targetReg = getRegisterByName(reg.toString());
+                s.rhs().accept(this, targetReg);
                 return null;
             } else if (spillOffsets.containsKey(ent)) {
                 // 变量溢出到栈上，计算RHS后存储 - 根据变量类型使用正确的存储指令
                 System.err.println("Storing to " + ent.name() + " in spill offset " + spillOffsets.get(ent));
-                s.rhs().accept(this);
+                // 使用RegisterAwareVisitor，计算到x0
+                s.rhs().accept(this, Register.X0);
                 long offset = spillOffsets.get(ent);
 
                 // 根据变量类型使用正确的存储指令，避免统一使用64位指令导致的数据覆盖问题
@@ -642,7 +634,8 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         if (s.lhs() instanceof Var) {
             // 如果寄存器中没有，溢出中也没有计算，那说明这个变量应该是全局变量
             // 对于Var类型的LHS，直接计算RHS并存储
-            s.rhs().accept(this);
+            // 使用RegisterAwareVisitor，计算到x0
+            s.rhs().accept(this, Register.X0);
             Register temp = allocateTempRegisterWithSpill(context, "assign rhs save");
             assembly.add(new Directive("\tmov\t" + temp + ", x0"));
             storeToVar((Var) s.lhs(), temp);
@@ -651,7 +644,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         }
 
         // 1) 先算 RHS，值在 x0
-        s.rhs().accept(this);
+        s.rhs().accept(this, Register.X0);
         Register temp = allocateTempRegisterWithSpill(context, "assign tmp0");
         Register temp2 = allocateTempRegisterWithSpill(context, "assign tmp1");
         assembly.add(new Directive("\tmov\t" + temp + ", x0")); // 保存值
@@ -688,33 +681,29 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         return null;
     }
 
-    @Override
     public Void visit(ExprStmt s) {
-        s.expr().accept(this);
+        s.expr().accept(this, Register.X0);
         return null;
     }
 
-    @Override
     public Void visit(CJump s) {
-        s.cond().accept(this);
+        s.cond().accept(this, Register.X0);
         assembly.add(new Directive("\tcmp\tx0, #0"));
         assembly.add(new Directive("\tb.ne\t" + s.thenLabel().symbol().toSource(labelSymbols) + "f"));
         assembly.add(new Directive("\tb\t" + s.elseLabel().symbol().toSource(labelSymbols) + "f"));
         return null;
     }
 
-    @Override
     public Void visit(Jump s) {
         // 对于Jump指令，使用向前跳转
         assembly.add(new Directive("\tb\t" + s.label().symbol().toSource(labelSymbols) + "f"));
         return null;
     }
 
-    @Override
     public Void visit(Switch s) {
         TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
                 "Switch");
-        s.cond().accept(this);
+        s.cond().accept(this, Register.X0);
         // 条件值现在在 x0 中
         for (Case c : s.cases()) {
             // 将 case 值加载到临时寄存器
@@ -732,16 +721,15 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         return null;
     }
 
-    @Override
     public Void visit(LabelStmt s) {
         assembly.add(new Directive(s.label().symbol().toSource(labelSymbols) + "f:"));
         return null;
     }
 
-    @Override
     public Void visit(Return s) {
         if (s.expr() != null) {
-            s.expr().accept(this);
+            // 使用RegisterAwareVisitor，计算到x0
+            s.expr().accept(this, Register.X0);
         } else {
             assembly.add(new Directive("\tmov\tx0, #0"));
         }
@@ -749,9 +737,9 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         return null;
     }
 
-    @Override
     public Void visit(Uni e) {
-        e.expr().accept(this);
+        // 使用RegisterAwareVisitor，计算到x0
+        e.expr().accept(this, Register.X0);
         switch (e.op()) {
             case UMINUS:
                 assembly.add(new Directive("\tneg\tx0, x0"));
@@ -780,92 +768,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         return null;
     }
 
-    @Override
-    public Void visit(Bin e) {
-        // 使用临时寄存器避免寄存器冲突
-        TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
-                "Bin");
-        e.right().accept(this);
-        Register tmp0 = allocateTempRegisterWithSpill(context, "bin right");
-        assembly.add(new Directive("\tmov\t" + tmp0.name() + ", x0"));
-
-        e.left().accept(this);
-
-        switch (e.op()) {
-            case ADD:
-                assembly.add(new Directive("\tadd\tx0, x0, " + tmp0));
-                break;
-            case SUB:
-                assembly.add(new Directive("\tsub\tx0, x0, " + tmp0));
-                break;
-            case MUL:
-                assembly.add(new Directive("\tmul\tx0, x0, " + tmp0));
-                break;
-            case S_DIV:
-                assembly.add(new Directive("\tsdiv\tx0, x0, " + tmp0));
-                break;
-            case S_MOD:
-                Register tempRegister = allocateTempRegisterWithSpill(context, "mod");
-                assembly.add(new Directive("\tsdiv\t" + tempRegister + ", x0, " + tmp0));
-                assembly.add(new Directive("\tmul\t" + tempRegister + ", " + tempRegister + ", " + tmp0));
-                assembly.add(new Directive("\tsub\tx0, x0, " + tempRegister));
-                releaseTempRegisterWithRestore(tempRegister, context);
-                break;
-            case BIT_AND:
-                assembly.add(new Directive("\tand\tx0, x0, " + tmp0));
-                break;
-            case BIT_OR:
-                assembly.add(new Directive("\torr\tx0, x0, " + tmp0));
-                break;
-            case BIT_XOR:
-                assembly.add(new Directive("\teor\tx0, x0, " + tmp0));
-                break;
-            case BIT_LSHIFT:
-                assembly.add(new Directive("\tlsl\tx0, x0, " + tmp0));
-                break;
-            case ARITH_RSHIFT:
-                assembly.add(new Directive("\tasr\tx0, x0, " + tmp0));
-                break;
-            case EQ:
-                assembly.add(new Directive("\tcmp\tx0, " + tmp0));
-                assembly.add(new Directive("\tcset\tx0, eq"));
-                break;
-            case NEQ:
-                assembly.add(new Directive("\tcmp\tx0, " + tmp0));
-                assembly.add(new Directive("\tcset\tx0, ne"));
-                break;
-            case S_LT:
-                assembly.add(new Directive("\tcmp\tx0, " + tmp0));
-                assembly.add(new Directive("\tcset\tx0, lt"));
-                break;
-            case S_LTEQ:
-                assembly.add(new Directive("\tcmp\tx0, " + tmp0));
-                assembly.add(new Directive("\tcset\tx0, le"));
-                break;
-            case S_GT:
-                assembly.add(new Directive("\tcmp\tx0, " + tmp0));
-                assembly.add(new Directive("\tcset\tx0, gt"));
-                break;
-            case S_GTEQ:
-                assembly.add(new Directive("\tcmp\tx0, " + tmp0));
-                assembly.add(new Directive("\tcset\tx0, ge"));
-                break;
-            default:
-                // 保持x0不变
-                break;
-        }
-        releaseTempRegisterWithRestore(tmp0, context);
-        context.checkState();
-        return null;
-    }
-
-    @Override
-    public Void visit(Addr e) {
-        addrOfEntity(e.entity());
-        return null;
-    }
-
-    @Override
     public Void visit(Mem e) {
         // 计算地址到 x11，避免覆盖 x0 里的中间值
         TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
@@ -895,7 +797,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         return null;
     }
 
-    @Override
     public Void visit(Var e) {
         Entity ent = e.entity();
         net.loveruby.cflat.asm.Register reg = registerMap.get(ent);
@@ -937,7 +838,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         return null;
     }
 
-    @Override
     public Void visit(Int e) {
         long v = e.value();
         if (e.type().size() == 4) {
@@ -960,10 +860,9 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         }
     }
 
-    @Override
     public Void visit(Str e) {
-        assembly.add(new Directive("\tadrp\tx0, " + e.entry().symbol() + "@PAGE"));
-        assembly.add(new Directive("\tadd\tx0, x0, " + e.entry().symbol() + "@PAGEOFF"));
+        assembly.add(new Directive("\tadrp\tx0, " + e.symbol().name() + "@PAGE"));
+        assembly.add(new Directive("\tadd\tx0, x0, " + e.symbol().name() + "@PAGEOFF"));
         return null;
     }
 
@@ -979,110 +878,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
 
     private ImmediateValue imm(Symbol s) {
         return new ImmediateValue(s);
-    }
-
-    private void addrOfEntity(Entity ent) {
-        if (localVarOffsets.containsKey(ent)) {
-            long off = localVarOffsets.get(ent);
-            if (off >= 0) {
-                assembly.add(new Directive("\tadd\tx0, x29, #" + off));
-            } else {
-                assembly.add(new Directive("\tsub\tx0, x29, #" + (-off)));
-            }
-        } else if (paramOffsets.containsKey(ent)) {
-            long off = paramOffsets.get(ent);
-            // 其他参数在栈上，使用正数偏移
-            assembly.add(new Directive("\tadd\tx0, x29, #" + off));
-        } else {
-            // 使用预设的符号引用
-            if (ent.address() != null) {
-                // 如果有预设的地址，直接使用
-                if (ent.address() instanceof ImmediateValue) {
-                    ImmediateValue imm = (ImmediateValue) ent.address();
-                    if (imm.expr() instanceof Symbol) {
-                        Symbol sym = (Symbol) imm.expr();
-                        String symStr = sym.toSource();
-                        if (symStr.endsWith("@GOT")) {
-                            // 对于@GOT符号，使用@GOTPAGE和@GOTPAGEOFF重定位
-                            String baseSym = symStr.substring(0, symStr.length() - 4);
-                            assembly.add(new Directive("\tadrp\tx0, " + baseSym + "@GOTPAGE"));
-                            assembly.add(new Directive("\tldr\tx0, [x0, " + baseSym + "@GOTPAGEOFF]"));
-                        } else if (ent.type().isFunction() && !isDefinedHere(ent)) {
-                            // 对于外部函数，使用@PAGE和@PAGEOFF重定位
-                            assembly.add(new Directive("\tadrp\tx0, " + symStr + "@GOTPAGE"));
-                            assembly.add(new Directive("\tldr\tx0, [x0, " + symStr + "@GOTPAGEOFF]"));
-                        } else {
-                            // 对于普通符号，使用@PAGE和@PAGEOFF重定位
-                            assembly.add(new Directive("\tadrp\tx0, " + symStr + "@PAGE"));
-                            assembly.add(new Directive("\tadd\tx0, x0, " + symStr + "@PAGEOFF"));
-                        }
-                    } else {
-                        // 兜底方案
-                        String symbolName = "_" + ent.name();
-                        if (ent.type().isFunction() && !isDefinedHere(ent)) {
-                            // 对于外部函数，使用@GOT重定位
-                            assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@GOTPAGE"));
-                            assembly.add(new Directive("\tldr\tx0, [x0, " + symbolName + "@GOTPAGEOFF]"));
-                        } else {
-                            assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
-                            assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
-                        }
-                    }
-                } else {
-                    // 兜底方案
-                    String symbolName = "_" + ent.name();
-                    if (ent.type().isFunction() && !isDefinedHere(ent)) {
-                        // 对于外部函数，使用@GOT重定位
-                        assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@GOTPAGE"));
-                        assembly.add(new Directive("\tldr\tx0, [x0, " + symbolName + "@GOTPAGEOFF]"));
-                    } else {
-                        assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
-                        assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
-                    }
-                }
-            } else if (ent.memref() != null) {
-                // 如果有预设的内存引用，使用它
-                if (ent.memref() instanceof DirectMemoryReference) {
-                    DirectMemoryReference mem = (DirectMemoryReference) ent.memref();
-                    if (mem.value() instanceof Symbol) {
-                        Symbol sym = (Symbol) mem.value();
-                        String symStr = sym.toSource();
-                        if (symStr.endsWith("@GOT")) {
-                            // 对于@GOT符号，使用@GOTPAGE和@GOTPAGEOFF重定位
-                            String baseSym = symStr.substring(0, symStr.length() - 4);
-                            assembly.add(new Directive("\tadrp\tx0, " + baseSym + "@GOTPAGE"));
-                            assembly.add(new Directive("\tldr\tx0, [x0, " + baseSym + "@GOTPAGEOFF]"));
-                        } else {
-                            // 对于普通符号，使用@PAGE和@PAGEOFF重定位
-                            assembly.add(new Directive("\tadrp\tx0, " + symStr + "@PAGE"));
-                            assembly.add(new Directive("\tadd\tx0, x0, " + symStr + "@PAGEOFF"));
-                        }
-                    } else {
-                        // 兜底方案
-                        String symbolName = "_" + ent.name();
-                        assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
-                        assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
-                    }
-                } else {
-                    // 兜底方案
-                    String symbolName = "_" + ent.name();
-                    assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@PAGE"));
-                    assembly.add(new Directive("\tadd\tx0, x0, " + symbolName + "@PAGEOFF"));
-                }
-            } else {
-                // 兜底方案：动态生成重定位
-                String symbolName = "_" + ent.name();
-                if (ent.type().isFunction()) {
-                    // 对于外部函数，使用@GOT重定位
-                    assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@GOTPAGE"));
-                    assembly.add(new Directive("\tldr\tx0, [x0, " + symbolName + "@GOTPAGEOFF]"));
-                } else {
-                    // 对于外部变量，也使用@GOT重定位
-                    assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@GOTPAGE"));
-                    assembly.add(new Directive("\tldr\tx0, [x0, " + symbolName + "@GOTPAGEOFF]"));
-                }
-            }
-        }
     }
 
     private void evalAddressInto(Expr e, Register dstRegister) {
@@ -1127,13 +922,12 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             materializeImmediate64(dst, ((Int) e).value(), false);
             return;
         }
-        if (e instanceof Bin) {
-            Bin b = (Bin) e;
+        if (e instanceof Bin b) {
             Op op = b.op();
             if (op == Op.ADD || op == Op.SUB) {
                 evalAddressInto(b.left(), dstRegister); // base -> dst
                 // 使用临时寄存器计算右边的表达式，避免寄存器冲突
-                b.right().accept(this);
+                b.right().accept(this, Register.X0);
                 if (op == Op.ADD)
                     assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + "x0"));
                 else
@@ -1141,13 +935,13 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 return;
             }
             // 对于其他操作，使用临时寄存器避免寄存器冲突
-            b.right().accept(this);
+            b.right().accept(this, Register.X0);
             Register tempRegister = allocateTempRegisterWithSpill(context, "evalAddressInto other");
             if (tempRegister.name().equals(dst)) {
                 throw new IllegalStateException(("tmpRegister wrong !! " + dst));
             }
             assembly.add(new Directive("\tmov\t" + tempRegister + ", x0")); // 将右操作数保存到临时寄存器
-            b.left().accept(this);
+            b.left().accept(this, Register.X0);
 
             switch (op) {
                 case MUL:
@@ -1191,7 +985,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             return;
         }
         // fallback
-        e.accept(this); // x0 assumed = address
+        e.accept(this, Register.X0); // x0 assumed = address
         if (!"x0".equals(dst))
             assembly.add(new Directive("\tmov\t" + dst + ", x0"));
     }
@@ -1218,10 +1012,8 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             // 使用预设的符号引用
             if (ent.address() != null) {
                 // 如果有预设的地址，直接使用
-                if (ent.address() instanceof ImmediateValue) {
-                    ImmediateValue imm = (ImmediateValue) ent.address();
-                    if (imm.expr() instanceof Symbol) {
-                        Symbol sym = (Symbol) imm.expr();
+                if (ent.address() instanceof ImmediateValue imm) {
+                    if (imm.expr() instanceof Symbol sym) {
                         String symStr = sym.toSource();
                         if (symStr.endsWith("@GOT")) {
                             // 对于@GOT符号，使用@GOTPAGE和@GOTPAGEOFF重定位
@@ -1229,29 +1021,42 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                             assembly.add(new Directive("\tadrp\t" + dst + ", " + baseSym + "@GOTPAGE"));
                             assembly.add(
                                     new Directive("\tldr\t" + dst + ", [" + dst + ", " + baseSym + "@GOTPAGEOFF]"));
+                        } else if (ent.type().isFunction() && !isDefinedHere(ent)) {
+                            // 外部函数：通过GOT取地址
+                            assembly.add(new Directive("\tadrp\t" + dst + ", " + symStr + "@GOTPAGE"));
+                            assembly.add(new Directive("\tldr\t" + dst + ", [" + dst + ", " + symStr + "@GOTPAGEOFF]"));
                         } else {
-                            // 对于普通符号，使用@PAGE和@PAGEOFF重定位
+                            // 其它：PAGE/PAGEOFF
                             assembly.add(new Directive("\tadrp\t" + dst + ", " + symStr + "@PAGE"));
                             assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + symStr + "@PAGEOFF"));
                         }
                     } else {
                         // 兜底方案
                         String symbolName = "_" + ent.name();
-                        assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@PAGE"));
-                        assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + symbolName + "@PAGEOFF"));
+                        if (ent.type().isFunction() && !isDefinedHere(ent)) {
+                            assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@GOTPAGE"));
+                            assembly.add(
+                                    new Directive("\tldr\t" + dst + ", [" + dst + ", " + symbolName + "@GOTPAGEOFF]"));
+                        } else {
+                            assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@PAGE"));
+                            assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + symbolName + "@PAGEOFF"));
+                        }
                     }
                 } else {
                     // 兜底方案
                     String symbolName = "_" + ent.name();
-                    assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@PAGE"));
-                    assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + symbolName + "@PAGEOFF"));
+                    if (ent.type().isFunction() && !isDefinedHere(ent)) {
+                        assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@GOTPAGE"));
+                        assembly.add(new Directive("\tldr\t" + dst + ", [" + dst + ", " + symbolName + "@GOTPAGEOFF]"));
+                    } else {
+                        assembly.add(new Directive("\tadrp\t" + dst + ", " + symbolName + "@PAGE"));
+                        assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + symbolName + "@PAGEOFF"));
+                    }
                 }
             } else if (ent.memref() != null) {
                 // 如果有预设的内存引用，使用它
-                if (ent.memref() instanceof DirectMemoryReference) {
-                    DirectMemoryReference mem = (DirectMemoryReference) ent.memref();
-                    if (mem.value() instanceof Symbol) {
-                        Symbol sym = (Symbol) mem.value();
+                if (ent.memref() instanceof DirectMemoryReference mem) {
+                    if (mem.value() instanceof Symbol sym) {
                         String symStr = sym.toSource();
                         if (symStr.endsWith("@GOT")) {
                             // 对于@GOT符号，使用@GOTPAGE和@GOTPAGEOFF重定位
@@ -1259,8 +1064,12 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                             assembly.add(new Directive("\tadrp\t" + dst + ", " + baseSym + "@GOTPAGE"));
                             assembly.add(
                                     new Directive("\tldr\t" + dst + ", [" + dst + ", " + baseSym + "@GOTPAGEOFF]"));
+                        } else if (ent.type().isFunction() && !isDefinedHere(ent)) {
+                            // 外部函数：通过GOT取地址
+                            assembly.add(new Directive("\tadrp\t" + dst + ", " + symStr + "@GOTPAGE"));
+                            assembly.add(new Directive("\tldr\t" + dst + ", [" + dst + ", " + symStr + "@GOTPAGEOFF]"));
                         } else {
-                            // 对于普通符号，使用@PAGE和@PAGEOFF重定位
+                            // 其它：PAGE/PAGEOFF
                             assembly.add(new Directive("\tadrp\t" + dst + ", " + symStr + "@PAGE"));
                             assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + symStr + "@PAGEOFF"));
                         }
@@ -1470,23 +1279,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         }
     }
 
-    /**
-     * mov/movk/movn build 64-bit imm; signExtend32 为 true 时按 32 位有符号扩展
-     */
-    /**
-     * 判断一个表达式是否是地址计算表达式
-     */
-    private boolean isAddressExpression(Expr e) {
-        if (e instanceof Addr) {
-            return true;
-        }
-        if (e instanceof Bin) {
-            Bin b = (Bin) e;
-            return b.op() == Op.ADD || b.op() == Op.SUB;
-        }
-        return false;
-    }
-
     private void materializeImmediate64(String reg, long v, boolean signExtend32) {
         if (signExtend32) {
             long w = v & 0xFFFFFFFFL;
@@ -1498,7 +1290,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
             return;
         }
         if (v < 0) {
-            long uv = ~(-v) & 0xFFFFFFFFFFFFFFFFL;
+            long uv = ~(-v);
             assembly.add(new Directive("\tmovn\t" + reg + ", #" + (uv & 0xFFFF)));
             for (int s = 16; s < 64; s += 16) {
                 long chunk = (uv >>> s) & 0xFFFF;
@@ -1521,18 +1313,6 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
     private String escapeString(String s) {
         // use your own correct version
         return s.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n");
-    }
-
-    private void storeSized(String addrReg, String srcReg, long size, boolean isUnsigned) {
-        if (size == 1) {
-            String wsrc = srcReg.replace('x', 'w');
-            assembly.add(new Directive("\tstrb\t" + wsrc + ", [" + addrReg + "]"));
-        } else if (size == 4) {
-            String wsrc = srcReg.replace('x', 'w');
-            assembly.add(new Directive("\tstr\t" + wsrc + ", [" + addrReg + "]"));
-        } else {
-            assembly.add(new Directive("\tstr\t" + srcReg + ", [" + addrReg + "]"));
-        }
     }
 
     private boolean isDefinedHere(Entity ent) {
@@ -1565,7 +1345,7 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
         Register reg = registerAllocator.allocateTempRegister();
         if (reg == null) {
             // 需要溢出，获取需要溢出的寄存器
-            Register spilledReg = registerAllocator.getRegisterToSpill();
+            Register spilledReg = registerAllocator.getRegisterToSpill(context);
 
             // 检查这个寄存器是否已经被当前context分配过
             if (context.isRegisterAllocated(spilledReg)) {
@@ -1696,6 +1476,590 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator, I
                 assembly.add(new Directive("\tldp\t" + pair[0] + ", " + pair[1] + ", [sp], #16"));
             }
         }
+    }
+
+    // ====== RegisterAwareVisitor Implementation ======
+
+    @Override
+    public Void visit(Expr expr, Register targetRegister) {
+        // 根据表达式类型分发到具体的处理方法
+        if (expr instanceof Bin) {
+            return visit((Bin) expr, targetRegister);
+        } else if (expr instanceof Uni) {
+            return visit((Uni) expr, targetRegister);
+        } else if (expr instanceof Var) {
+            return visit((Var) expr, targetRegister);
+        } else if (expr instanceof Int) {
+            return visit((Int) expr, targetRegister);
+        } else if (expr instanceof Str) {
+            return visit((Str) expr, targetRegister);
+        } else if (expr instanceof Call) {
+            return visit((Call) expr, targetRegister);
+        } else if (expr instanceof Addr) {
+            return visit((Addr) expr, targetRegister);
+        } else if (expr instanceof Mem) {
+            return visit((Mem) expr, targetRegister);
+        } else {
+            throw new Error("Unsupported expression type: " + expr.getClass().getSimpleName());
+        }
+    }
+
+    @Override
+    public Void visit(Stmt stmt) {
+        // 根据语句类型分发到具体的处理方法
+        if (stmt instanceof Assign) {
+            return visit((Assign) stmt);
+        } else if (stmt instanceof ExprStmt) {
+            return visit((ExprStmt) stmt);
+        } else if (stmt instanceof CJump) {
+            return visit((CJump) stmt);
+        } else if (stmt instanceof Jump) {
+            return visit((Jump) stmt);
+        } else if (stmt instanceof Switch) {
+            return visit((Switch) stmt);
+        } else if (stmt instanceof LabelStmt) {
+            return visit((LabelStmt) stmt);
+        } else if (stmt instanceof Return) {
+            return visit((Return) stmt);
+        } else {
+            throw new Error("Unsupported statement type: " + stmt.getClass().getSimpleName());
+        }
+    }
+
+    // ====== Register-aware visit methods for expressions ======
+
+    public Void visit(Bin e, Register targetRegister) {
+        // 根据操作类型和操作数类型选择合适的寄存器
+        boolean isFloatOp = isFloatOperation(e);
+        if (isFloatOp) {
+            handleFloatBinaryOp(e, targetRegister);
+        } else {
+            handleIntegerBinaryOp(e, targetRegister);
+        }
+        return null;
+    }
+
+    public Void visit(Uni e, Register targetRegister) {
+        // 记录传入寄存器的分配，避免寄存器分配重复
+        TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "Uni");
+        context.recordRegisterAllocation(targetRegister);
+
+        // 一元操作：先计算操作数到目标寄存器，然后应用操作
+        e.expr().accept(this, targetRegister);
+
+        String targetRegName = targetRegister.name();
+        switch (e.op()) {
+            case UMINUS:
+                if (isFloatOperand(e.expr())) {
+                    assembly.add(new Directive("\tfneg\td0, " + targetRegName));
+                } else {
+                    assembly.add(new Directive("\tneg\t" + targetRegName + ", " + targetRegName));
+                }
+                break;
+            case BIT_NOT:
+                if (e.type().size() == 4) {
+                    assembly.add(new Directive(
+                            "\tmvn\tw" + targetRegName.substring(1) + ", w" + targetRegName.substring(1)));
+                    assembly.add(new Directive("\tsxtw\t" + targetRegName + ", w" + targetRegName.substring(1)));
+                } else {
+                    assembly.add(new Directive("\tmvn\t" + targetRegName + ", " + targetRegName));
+                }
+                break;
+            case NOT:
+                assembly.add(new Directive("\tcmp\t" + targetRegName + ", #0"));
+                assembly.add(new Directive("\tcset\t" + targetRegName + ", eq"));
+                break;
+            case S_CAST:
+                break;
+            case U_CAST:
+                if (e.expr().type().size() == 4 && e.type().size() == 8) {
+                    assembly.add(new Directive("\tuxtw\t" + targetRegName + ", w" + targetRegName.substring(1)));
+                }
+                break;
+            default:
+                throw new Error("Unsupported unary operation: " + e.op());
+        }
+        return null;
+    }
+
+    public Void visit(Var e, Register targetRegister) {
+        // 记录传入寄存器的分配，避免寄存器分配重复
+        TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "Var");
+        context.recordRegisterAllocation(targetRegister);
+
+        // 变量加载到指定寄存器
+        String targetRegName = targetRegister.name();
+        Entity entity = e.entity();
+
+        if (entity.isConstant()) {
+            // 常量直接加载
+            if (entity.type().isFloat()) {
+                // 浮点常量需要特殊处理
+                assembly.add(new Directive("\tadrp\t" + targetRegName + ", " + entity.name() + "@PAGE"));
+                assembly.add(new Directive(
+                        "\tadd\t" + targetRegName + ", " + targetRegName + ", " + entity.name() + "@PAGEOFF"));
+                assembly.add(new Directive("\tldr\td0, [" + targetRegName + "]"));
+            } else {
+                assembly.add(new Directive("\tadrp\t" + targetRegName + ", " + entity.name() + "@PAGE"));
+                assembly.add(new Directive(
+                        "\tadd\t" + targetRegName + ", " + targetRegName + ", " + entity.name() + "@PAGEOFF"));
+                assembly.add(new Directive("\tldr\t" + targetRegName + ", [" + targetRegName + "]"));
+            }
+        } else {
+            // 变量从栈或寄存器加载
+            net.loveruby.cflat.asm.Register reg = registerMap.get(entity);
+
+            if (reg != null) {
+                // 变量在寄存器中，直接移动到目标寄存器
+                System.err.println("Loading " + entity.name() + " from register " + reg);
+                assembly.add(new Directive("\tmov\t" + targetRegName + ", " + reg));
+            } else if (spillOffsets.containsKey(entity)) {
+                // 变量溢出到栈上，从栈加载 - 根据变量类型使用正确的加载指令
+                long offset = spillOffsets.get(entity);
+                System.err.println("Loading " + entity.name() + " from spill offset " + offset);
+
+                // 根据变量类型使用正确的加载指令，避免统一使用64位指令导致的数据覆盖问题
+                long sz = e.type().size();
+                if (sz == 8) {
+                    // 64位变量：直接使用64位加载指令
+                    assembly.add(new Directive("\tldr\t" + targetRegName + ", [x29, #" + offset + "]"));
+                } else if (sz == 4) {
+                    // 32位变量：使用32位加载指令，然后有符号扩展到64位
+                    assembly.add(new Directive("\tldr\tw" + targetRegName.substring(1) + ", [x29, #" + offset + "]"));
+                    assembly.add(new Directive("\tsxtw\t" + targetRegName + ", w" + targetRegName.substring(1)));
+                } else if (sz == 2) {
+                    // 16位变量：使用16位加载指令，然后有符号扩展到64位
+                    assembly.add(new Directive("\tldrh\tw" + targetRegName.substring(1) + ", [x29, #" + offset + "]"));
+                    assembly.add(new Directive("\tsxth\t" + targetRegName + ", w" + targetRegName.substring(1)));
+                } else if (sz == 1) {
+                    // 8位变量：使用8位加载指令，然后有符号扩展到64位
+                    assembly.add(new Directive("\tldrb\tw" + targetRegName.substring(1) + ", [x29, #" + offset + "]"));
+                    assembly.add(new Directive("\tsxtb\t" + targetRegName + ", w" + targetRegName.substring(1)));
+                } else {
+                    errorHandler.error("unsupported load size: " + sz);
+                }
+            } else {
+                // 使用原有的栈访问方法
+                System.err.println("Loading " + entity.name() + " from stack");
+                loadFromVar(e, targetRegName);
+            }
+        }
+        return null;
+    }
+
+    public Void visit(Int e, Register targetRegister) {
+        // 记录传入寄存器的分配，避免寄存器分配重复
+        TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "Int");
+        context.recordRegisterAllocation(targetRegister);
+
+        // 整数常量加载到指定寄存器
+        String targetRegName = targetRegister.name();
+        long v = e.value();
+        if (e.type().size() == 4) {
+            assembly.add(new Directive("\tmov\tw" + targetRegName.substring(1) + ", #" + (v & 0xFFFFFFFFL)));
+            assembly.add(new Directive("\tsxtw\t" + targetRegName + ", w" + targetRegName.substring(1)));
+        } else {
+            materializeImmediate64(targetRegName, v, false);
+        }
+        return null;
+    }
+
+    public Void visit(Str e, Register targetRegister) {
+        // 记录传入寄存器的分配，避免寄存器分配重复
+        TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "Str");
+        context.recordRegisterAllocation(targetRegister);
+
+        // 字符串地址加载到指定寄存器
+        String targetRegName = targetRegister.name();
+        assembly.add(new Directive("\tadrp\t" + targetRegName + ", " + e.symbol().name() + "@PAGE"));
+        assembly.add(new Directive(
+                "\tadd\t" + targetRegName + ", " + targetRegName + ", " + e.symbol().name() + "@PAGEOFF"));
+        return null;
+    }
+
+    public Void visit(Call e, Register targetRegister) {
+        // 记录传入寄存器的分配，避免寄存器分配重复
+        TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
+                "Call");
+        context.recordRegisterAllocation(targetRegister);
+
+        // 函数调用，结果放在指定寄存器
+        String targetRegName = targetRegister.name();
+
+        boolean isVar = e.isStaticCall() &&
+                e.function().type().getFunctionType().isVararg();
+        List<Expr> args = e.args();
+        int total = args.size();
+        int fixed = 0;
+        if (e.isStaticCall()) {
+            fixed = e.function().type().getFunctionType().paramTypes().size();
+        }
+
+        // 优化：只保存实际使用到的caller-saved寄存器
+        boolean shouldSaveCallerRegister = !e.isStaticCall() || !e.function().name().equals("alloca");
+        Set<Register> usedCallerSaved = new HashSet<>();
+        if (shouldSaveCallerRegister) {
+            // 获取在函数调用点实际活跃的caller-saved寄存器
+            usedCallerSaved = registerAllocator.getLiveCallerSavedRegisters(currentStmt);
+            System.err.println("Live caller-saved registers at call site: "
+                    + usedCallerSaved.stream().map(Register::name).collect(Collectors.joining(", ")));
+
+            // 按寄存器对保存，保持16字节对齐
+            saveCallerSavedRegisters(usedCallerSaved);
+        }
+
+        int stackArgs = Math.max(0, total - ARG_REGS.length);
+        int shadow = isVar ? 8 * (total - fixed) : 0;
+        int temp = total * 8;
+        int block = shadow + stackArgs * 8 + temp;
+        block = (block + 15) & ~15;
+
+        if (block > 0)
+            assembly.add(new Directive("\tsub\tsp, sp, #" + block));
+
+        int tempBase = shadow + stackArgs * 8;
+
+        // Pass1: L->R - 计算所有参数到栈
+        for (int i = 0; i < total; ++i) {
+            args.get(i).accept(this, Register.X0); // 计算到x0
+            assembly.add(new Directive("\tstr\tx0, [sp, #" + (tempBase + i * 8L) + "]"));
+        }
+
+        Register tempRegister = allocateTempRegisterWithSpill(context, "call mov args");
+
+        // Pass2: L->R - 从栈移动到寄存器
+        for (int i = 0; i < total; ++i) {
+            long src = tempBase + i * 8L;
+            if (i == 0) {
+                assembly.add(new Directive("\tldr\tx0, [sp, #" + src + "]"));
+            } else {
+                assembly.add(new Directive("\tldr\t" + tempRegister + ", [sp, #" + src + "]"));
+            }
+
+            String dst;
+            if (i < ARG_REGS.length) {
+                dst = ARG_REGS[i].toString();
+                if (i != 0) {
+                    assembly.add(new Directive("\tmov\t" + dst + ", " + tempRegister));
+                }
+            } else {
+                dst = tempRegister.toString();
+            }
+
+            // 可变参数：把所有可变参数push到shadow区域
+            if (isVar && i >= fixed) {
+                long sh = (i - fixed) * 8L;
+                assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + sh + "]"));
+            }
+            if (i >= ARG_REGS.length) {
+                long off = shadow + (long) (i - ARG_REGS.length) * 8;
+                assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + off + "]"));
+            }
+        }
+        releaseTempRegisterWithRestore(tempRegister, context);
+
+        if (e.isStaticCall()) {
+            // 对于变长参数函数，我们需要特殊处理va_init调用
+            if (e.function().name().equals("va_init")) {
+                // va_init期望接收当前栈指针的值
+                assembly.add(new Directive("\tmov\tx0, sp"));
+            }
+            assembly.add(new Directive("\tbl\t" + e.function().callingSymbol().toSource()));
+        } else {
+            // 对于间接函数调用，需要将函数地址加载到不同的寄存器，避免覆盖x0中的参数
+            e.expr().accept(this, Register.X0); // callee -> x0
+            tempRegister = allocateTempRegisterWithSpill(context, "tmp pointer");
+            assembly.add(new Directive("\tmov\t" + tempRegister + ", x0")); // 将函数地址移动到临时寄存器
+            // 现在需要将第一个参数重新加载到x0
+            if (!e.args().isEmpty()) {
+                e.args().get(0).accept(this, Register.X0); // 重新加载第一个参数到x0
+            }
+            assembly.add(new Directive("\tblr\t" + tempRegister)); // 使用临时寄存器调用函数
+            releaseTempRegisterWithRestore(tempRegister, context);
+        }
+
+        if (block > 0)
+            assembly.add(new Directive("\tadd\tsp, sp, #" + block));
+        if (shouldSaveCallerRegister) {
+            // 恢复caller-saved寄存器，使用ldp保持16字节对齐
+            restoreCallerSavedRegisters(usedCallerSaved);
+        }
+
+        // 如果目标寄存器不是x0，需要移动结果
+        if (!targetRegName.equals("x0")) {
+            assembly.add(new Directive("\tmov\t" + targetRegName + ", x0"));
+        }
+
+        return null;
+    }
+
+    public Void visit(Addr e, Register targetRegister) {
+        // 记录传入寄存器的分配，避免寄存器分配重复
+        TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "Addr");
+        context.recordRegisterAllocation(targetRegister);
+
+        // 取地址操作
+        String targetRegName = targetRegister.name();
+        addrOfEntityInto(e.entity(), targetRegName);
+        return null;
+    }
+
+    public Void visit(Mem e, Register targetRegister) {
+        // 记录传入寄存器的分配，避免寄存器分配重复
+        TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
+                "Mem");
+        context.recordRegisterAllocation(targetRegister);
+
+        // 内存访问
+        String targetRegName = targetRegister.name();
+
+        // 计算地址到临时寄存器，避免覆盖目标寄存器
+        Register temp = allocateTempRegisterWithSpill(context, "mem");
+        evalAddressInto(e.expr(), temp);
+        String tempRef = "[" + temp.name() + "]";
+        long sz = e.type().size();
+
+        if (sz == 1) {
+            // 读 1 字节并做有符号扩展成 64 位
+            assembly.add(new Directive("\tldrb\tw" + targetRegName.substring(1) + ", " + tempRef));
+            assembly.add(new Directive("\tsxtb\t" + targetRegName + ", w" + targetRegName.substring(1)));
+        } else if (sz == 2) {
+            assembly.add(new Directive("\tldrh\tw" + targetRegName.substring(1) + ", " + tempRef));
+            assembly.add(new Directive("\tsxth\t" + targetRegName + ", w" + targetRegName.substring(1)));
+        } else if (sz == 4) {
+            assembly.add(new Directive("\tldr\tw" + targetRegName.substring(1) + ", " + tempRef));
+            assembly.add(new Directive("\tsxtw\t" + targetRegName + ", w" + targetRegName.substring(1)));
+        } else if (sz == 8) {
+            assembly.add(new Directive("\tldr\t" + targetRegName + ", " + tempRef));
+        } else {
+            errorHandler.error("unsupported load size: " + sz);
+        }
+        releaseTempRegisterWithRestore(temp, context);
+        context.checkState();
+        return null;
+    }
+
+    // ====== Helper methods for register-aware operations ======
+
+    private boolean isFloatOperation(Bin e) {
+        return switch (e.op()) {
+            case ADD, SUB, MUL, S_DIV -> isFloatOperand(e.left()) || isFloatOperand(e.right());
+            default -> false;
+        };
+    }
+
+    private boolean isFloatOperand(Expr expr) {
+        if (expr instanceof Var) {
+            Var var = (Var) expr;
+            return var.entity().type().isFloat();
+        }
+        return false;
+    }
+
+    private void handleFloatBinaryOp(Bin e, Register targetReg) {
+        // 为左操作数分配寄存器
+        TempRegisterAllocationContext leftContext = new TempRegisterAllocationContext(2, "bin_left");
+        leftContext.recordRegisterAllocation(targetReg);
+        Register leftReg = allocateTempRegisterWithSpill(leftContext, "bin_left");
+        e.left().accept(this, leftReg);
+
+        // 为右操作数分配寄存器
+        TempRegisterAllocationContext rightContext = new TempRegisterAllocationContext(2, "bin_right");
+        Register rightReg = allocateTempRegisterWithSpill(rightContext, "bin_right");
+        e.right().accept(this, rightReg);
+
+        // 执行浮点运算
+        switch (e.op()) {
+            case ADD:
+                assembly.add(new Directive("\tfadd\td0, " + leftReg.name() + ", " + rightReg.name()));
+                break;
+            case SUB:
+                assembly.add(new Directive("\tfsub\td0, " + leftReg.name() + ", " + rightReg.name()));
+                break;
+            case MUL:
+                assembly.add(new Directive("\tfmul\td0, " + leftReg.name() + ", " + rightReg.name()));
+                break;
+            case S_DIV:
+                assembly.add(new Directive("\tfdiv\td0, " + leftReg.name() + ", " + rightReg.name()));
+                break;
+            default:
+                throw new Error("Unsupported float operation: " + e.op());
+        }
+
+        // 移动结果到目标寄存器
+        if (!targetReg.equals("d0")) {
+            assembly.add(new Directive("\tfmov\t" + targetReg + ", d0"));
+        }
+
+        // 释放临时寄存器
+        releaseTempRegisterWithRestore(rightReg, rightContext);
+        releaseTempRegisterWithRestore(leftReg, leftContext);
+    }
+
+    private void handleIntegerBinaryOp(Bin e, Register targetReg) {
+        System.err.println("handleIntegerBinaryOp " + e);
+        // 为左操作数分配寄存器
+        TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "bin_left");
+        context.recordRegisterAllocation(targetReg);
+        Register leftReg = allocateTempRegisterWithSpill(context, "bin_left");
+        e.left().accept(this, leftReg);
+
+        // 为右操作数分配寄存器
+        Register rightReg = allocateTempRegisterWithSpill(context, "bin_right");
+        e.right().accept(this, rightReg);
+
+        // 执行整数运算
+        switch (e.op()) {
+            case ADD:
+                assembly.add(new Directive("\tadd\t" + targetReg + ", " + leftReg.name() + ", " + rightReg.name()));
+                break;
+            case SUB:
+                assembly.add(new Directive("\tsub\t" + targetReg + ", " + leftReg.name() + ", " + rightReg.name()));
+                break;
+            case MUL:
+                assembly.add(new Directive("\tmul\t" + targetReg + ", " + leftReg.name() + ", " + rightReg.name()));
+                break;
+            case S_DIV:
+                assembly.add(new Directive("\tsdiv\t" + targetReg + ", " + leftReg.name() + ", " + rightReg.name()));
+                break;
+            case U_DIV:
+                assembly.add(new Directive("\tudiv\t" + targetReg + ", " + leftReg.name() + ", " + rightReg.name()));
+                break;
+            case S_MOD:
+                assembly.add(new Directive("\tsdiv\t" + targetReg + ", " + leftReg.name() + ", " + rightReg.name()));
+                assembly.add(new Directive("\tmul\t" + targetReg + ", " + targetReg + ", " + rightReg.name()));
+                assembly.add(new Directive("\tsub\t" + targetReg + ", " + leftReg.name() + ", " + targetReg));
+                break;
+            case U_MOD:
+                assembly.add(new Directive("\tudiv\t" + targetReg + ", " + leftReg.name() + ", " + rightReg.name()));
+                assembly.add(new Directive("\tmul\t" + targetReg + ", " + targetReg + ", " + rightReg.name()));
+                assembly.add(new Directive("\tsub\t" + targetReg + ", " + leftReg.name() + ", " + targetReg));
+                break;
+            case BIT_AND:
+                assembly.add(new Directive("\tand\t" + targetReg + ", " + leftReg.name() + ", " + rightReg.name()));
+                break;
+            case BIT_OR:
+                assembly.add(new Directive("\torr\t" + targetReg + ", " + leftReg.name() + ", " + rightReg.name()));
+                break;
+            case BIT_XOR:
+                assembly.add(new Directive("\teor\t" + targetReg + ", " + leftReg.name() + ", " + rightReg.name()));
+                break;
+            case BIT_LSHIFT:
+                assembly.add(new Directive("\tlsl\t" + targetReg + ", " + leftReg.name() + ", " + rightReg.name()));
+                break;
+            case BIT_RSHIFT:
+                assembly.add(new Directive("\tlsr\t" + targetReg + ", " + leftReg.name() + ", " + rightReg.name()));
+                break;
+            case ARITH_RSHIFT:
+                assembly.add(new Directive("\tasr\t" + targetReg + ", " + leftReg.name() + ", " + rightReg.name()));
+                break;
+            case EQ:
+                assembly.add(new Directive("\tcmp\t" + leftReg.name() + ", " + rightReg.name()));
+                assembly.add(new Directive("\tcset\t" + targetReg + ", eq"));
+                break;
+            case NEQ:
+                assembly.add(new Directive("\tcmp\t" + leftReg.name() + ", " + rightReg.name()));
+                assembly.add(new Directive("\tcset\t" + targetReg + ", ne"));
+                break;
+            case S_LT:
+                assembly.add(new Directive("\tcmp\t" + leftReg.name() + ", " + rightReg.name()));
+                assembly.add(new Directive("\tcset\t" + targetReg + ", lt"));
+                break;
+            case S_LTEQ:
+                assembly.add(new Directive("\tcmp\t" + leftReg.name() + ", " + rightReg.name()));
+                assembly.add(new Directive("\tcset\t" + targetReg + ", le"));
+                break;
+            case S_GT:
+                assembly.add(new Directive("\tcmp\t" + leftReg.name() + ", " + rightReg.name()));
+                assembly.add(new Directive("\tcset\t" + targetReg + ", gt"));
+                break;
+            case S_GTEQ:
+                assembly.add(new Directive("\tcmp\t" + leftReg.name() + ", " + rightReg.name()));
+                assembly.add(new Directive("\tcset\t" + targetReg + ", ge"));
+                break;
+            case U_LT:
+                assembly.add(new Directive("\tcmp\t" + leftReg.name() + ", " + rightReg.name()));
+                assembly.add(new Directive("\tcset\t" + targetReg + ", lo"));
+                break;
+            case U_LTEQ:
+                assembly.add(new Directive("\tcmp\t" + leftReg.name() + ", " + rightReg.name()));
+                assembly.add(new Directive("\tcset\t" + targetReg + ", ls"));
+                break;
+            case U_GT:
+                assembly.add(new Directive("\tcmp\t" + leftReg.name() + ", " + rightReg.name()));
+                assembly.add(new Directive("\tcset\t" + targetReg + ", hi"));
+                break;
+            case U_GTEQ:
+                assembly.add(new Directive("\tcmp\t" + leftReg.name() + ", " + rightReg.name()));
+                assembly.add(new Directive("\tcset\t" + targetReg + ", hs"));
+                break;
+            default:
+                throw new Error("Unsupported integer operation: " + e.op());
+        }
+
+        // 释放临时寄存器
+        releaseTempRegisterWithRestore(rightReg, context);
+        releaseTempRegisterWithRestore(leftReg, context);
+    }
+
+    private void loadFromVar(Var v, String targetReg) {
+        Entity entity = v.entity();
+
+        if (localVarOffsets.containsKey(entity)) {
+            long off = localVarOffsets.get(entity);
+            if (off >= 0) {
+                assembly.add(new Directive("\tldr\t" + targetReg + ", [x29, #" + off + "]"));
+            } else {
+                assembly.add(new Directive("\tldr\t" + targetReg + ", [x29, #" + (-off) + "]"));
+            }
+        } else if (paramOffsets.containsKey(entity)) {
+            long off = paramOffsets.get(entity);
+            assembly.add(new Directive("\tldr\t" + targetReg + ", [x29, #" + off + "]"));
+        } else {
+            // 全局变量
+            addrOfEntityInto(entity, targetReg);
+            assembly.add(new Directive("\tldr\t" + targetReg + ", [" + targetReg + "]"));
+        }
+    }
+
+    /**
+     * 根据寄存器名称获取Register对象
+     */
+    private Register getRegisterByName(String name) {
+        return switch (name) {
+            case "x0" -> Register.X0;
+            case "x1" -> Register.X1;
+            case "x2" -> Register.X2;
+            case "x3" -> Register.X3;
+            case "x4" -> Register.X4;
+            case "x5" -> Register.X5;
+            case "x6" -> Register.X6;
+            case "x7" -> Register.X7;
+            case "x8" -> Register.X8;
+            case "x9" -> Register.X9;
+            case "x10" -> Register.X10;
+            case "x11" -> Register.X11;
+            case "x12" -> Register.X12;
+            case "x13" -> Register.X13;
+            case "x14" -> Register.X14;
+            case "x15" -> Register.X15;
+            case "x16" -> Register.X16;
+            case "x17" -> Register.X17;
+            case "x18" -> Register.X18;
+            case "x19" -> Register.X19;
+            case "x20" -> Register.X20;
+            case "x21" -> Register.X21;
+            case "x22" -> Register.X22;
+            case "x23" -> Register.X23;
+            case "x24" -> Register.X24;
+            case "x25" -> Register.X25;
+            case "x26" -> Register.X26;
+            case "x27" -> Register.X27;
+            case "x28" -> Register.X28;
+            case "x29" -> Register.X29;
+            case "x30" -> Register.X30;
+            default -> throw new Error("Unknown register name: " + name);
+        };
     }
 
 }

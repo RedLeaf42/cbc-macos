@@ -42,6 +42,10 @@ public class TempRegisterAllocationContext {
         return allocatedRegisters.contains(register);
     }
 
+    Set<Register> getAllocatedRegisters() {
+        return allocatedRegisters;
+    }
+
     /**
      * 记录寄存器被当前context分配
      */

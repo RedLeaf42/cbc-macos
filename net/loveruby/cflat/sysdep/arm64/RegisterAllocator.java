@@ -71,7 +71,7 @@ public class RegisterAllocator {
     private final Map<Entity, LifeRange> lifeRanges = new HashMap<>();
     /* 设计这个的目的是为了将寄存器分配逻辑完全放到CodeGenerator中，CodeGenerator不再保留任何硬编码代码 */
     private final Register[] totalTempRegisters = {
-            // Register.X12,
+             Register.X12,
             Register.X13,
             Register.X16
     };
@@ -110,16 +110,26 @@ public class RegisterAllocator {
         return item;
     }
 
+    public Set<Register> getAllocatedTempRegisters() {
+        return allocatedTempRegisters;
+    }
+
     /**
      * 获取需要溢出的寄存器（使用轮询策略，公平地选择寄存器）
      */
-    public Register getRegisterToSpill() {
+    public Register getRegisterToSpill(TempRegisterAllocationContext context) {
         if (allocatedTempRegisters.isEmpty()) {
             throw new IllegalStateException("no allocated temp register to spill");
         }
 
         // 将已分配的寄存器转换为数组，以便进行轮询
-        Register[] allocatedArray = allocatedTempRegisters.toArray(new Register[0]);
+        Set<Register> pendingToSpill = new HashSet<Register>();
+        pendingToSpill.addAll(allocatedTempRegisters);
+        pendingToSpill.removeAll(context.getAllocatedRegisters());
+        Register[] allocatedArray = pendingToSpill.toArray(new Register[0]);
+        if (allocatedArray.length == 0) {
+            throw new IllegalStateException("no register to spill");
+        }
 
         // 使用轮询策略选择寄存器
         Register selectedReg = allocatedArray[spillRoundRobinCounter % allocatedArray.length];
