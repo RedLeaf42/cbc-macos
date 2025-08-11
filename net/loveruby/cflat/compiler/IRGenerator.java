@@ -221,6 +221,16 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
         return null;
     }
 
+    public Void visit(VarDeclStmtNode node) {
+        // 处理变量声明语句
+        for (DefinedVariable var : node.variables()) {
+            if (var.hasInitializer()) {
+                assign(var.location(), ref(var), transformExpr(var.initializer()));
+            }
+        }
+        return null;
+    }
+
     // #@@range/If{
     public Void visit(IfNode node) {
         Label thenLabel = new Label();

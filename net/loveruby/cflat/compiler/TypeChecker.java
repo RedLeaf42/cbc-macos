@@ -98,6 +98,13 @@ class TypeChecker extends Visitor {
         return null;
     }
 
+    public Void visit(VarDeclStmtNode node) {
+        for (DefinedVariable var : node.variables()) {
+            checkVariable(var);
+        }
+        return null;
+    }
+
     public Void visit(IfNode node) {
         super.visit(node);
         checkCond(node.cond());
@@ -248,8 +255,27 @@ class TypeChecker extends Visitor {
         if (node.operator().equals("+") || node.operator().equals("-")) {
             expectsSameIntegerOrPointerDiff(node);
         } else if (node.operator().equals("*")
-                || node.operator().equals("/")
-                || node.operator().equals("%")
+                || node.operator().equals("/")) {
+            // 乘法和除法支持浮点数
+            if (node.left().type().isFloat() || node.right().type().isFloat()) {
+                // 浮点数运算：不允许混合运算，必须显式类型转换
+                if (node.left().type().isFloat() && node.right().type().isFloat()) {
+                    // 两个都是浮点数，类型必须相同
+                    if (!node.left().type().isSameType(node.right().type())) {
+                        error(node, "incompatible float types: " + node.left().type() + " and " + node.right().type());
+                        return null;
+                    }
+                    node.setType(node.left().type());
+                } else {
+                    // 混合类型运算，需要显式类型转换
+                    error(node, "mixed float and integer operations not allowed. Use explicit cast: " +
+                            node.left().type() + " " + node.operator() + " " + node.right().type());
+                    return null;
+                }
+            } else {
+                expectsSameInteger(node);
+            }
+        } else if (node.operator().equals("%")
                 || node.operator().equals("&")
                 || node.operator().equals("|")
                 || node.operator().equals("^")

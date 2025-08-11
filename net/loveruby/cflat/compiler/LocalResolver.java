@@ -88,6 +88,18 @@ public class LocalResolver extends Visitor {
         node.setScope(popScope());
         return null;
     }
+
+    public Void visit(VarDeclStmtNode node) {
+        // 动态添加变量到当前作用域
+        Scope scope = currentScope();
+        if (scope instanceof LocalScope) {
+            LocalScope localScope = (LocalScope) scope;
+            for (DefinedVariable var : node.variables()) {
+                localScope.defineVariable(var);
+            }
+        }
+        return null;
+    }
     // #@@}
 
     // #@@range/pushScope{

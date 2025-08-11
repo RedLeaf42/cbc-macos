@@ -1,4 +1,5 @@
 package net.loveruby.cflat.sysdep.x86;
+import net.loveruby.cflat.ir.Float;
 import net.loveruby.cflat.sysdep.CodeGeneratorOptions;
 import net.loveruby.cflat.ir.*;
 import net.loveruby.cflat.entity.*;
@@ -938,11 +939,21 @@ public class CodeGenerator implements net.loveruby.cflat.sysdep.CodeGenerator,
         as.mov(imm(node.value()), ax());
         return null;
     }
+
+    @Override
+    public Void visit(Float s) {
+        return null;
+    }
     // #@@}
 
     // #@@range/Str{
     public Void visit(Str node) {
         loadConstant(node, ax());
+        return null;
+    }
+
+    @Override
+    public Void visit(Cast s) {
         return null;
     }
     // #@@}

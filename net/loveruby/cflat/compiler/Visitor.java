@@ -48,6 +48,11 @@ abstract public class Visitor implements ASTVisitor<Void, Void> {
         return null;
     }
 
+    public Void visit(VarDeclStmtNode node) {
+        // 变量声明语句不需要特殊处理，变量已经在作用域中定义
+        return null;
+    }
+
     public Void visit(IfNode n) {
         visitExpr(n.cond());
         visitStmt(n.thenBody());

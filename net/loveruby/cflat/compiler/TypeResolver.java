@@ -152,6 +152,14 @@ public class TypeResolver extends Visitor
         return null;
     }
 
+    public Void visit(VarDeclStmtNode node) {
+        // 解析变量声明语句中的变量类型
+        for (DefinedVariable var : node.variables()) {
+            var.accept(this);
+        }
+        return null;
+    }
+
     public Void visit(CastNode node) {
         bindType(node.typeNode());
         super.visit(node);
