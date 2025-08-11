@@ -1588,7 +1588,8 @@ public class CodeGenerator
 
     public Void visit(net.loveruby.cflat.ir.Cast e, Register targetRegister) {
         // 记录传入寄存器的分配，避免寄存器分配重复
-        System.err.println("Cast operation targetType: "+e.targetType() + " targetRegister: "+targetRegister.name());
+        System.err
+                .println("Cast operation targetType: " + e.targetType() + " targetRegister: " + targetRegister.name());
         TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "Cast");
         context.recordRegisterAllocation(targetRegister);
 
@@ -1822,7 +1823,7 @@ public class CodeGenerator
 
     private boolean isFloatOperation(Bin e) {
         return switch (e.op()) {
-            case ADD, SUB, MUL, S_DIV -> isFloatOperand(e.left()) || isFloatOperand(e.right());
+            case ADD, SUB, MUL, S_DIV, U_DIV -> isFloatOperand(e.left()) || isFloatOperand(e.right());
             default -> false;
         };
     }
@@ -1831,6 +1832,8 @@ public class CodeGenerator
         if (expr instanceof Var) {
             Var var = (Var) expr;
             return var.entity().type().isFloat();
+        } else if (expr instanceof net.loveruby.cflat.ir.Float) {
+            return true;
         }
         return false;
     }
@@ -1862,6 +1865,7 @@ public class CodeGenerator
                         new Directive("\tfmul\t" + targetReg.name() + ", " + leftReg.name() + ", " + rightReg.name()));
                 break;
             case S_DIV:
+            case U_DIV:
                 assembly.add(
                         new Directive("\tfdiv\t" + targetReg.name() + ", " + leftReg.name() + ", " + rightReg.name()));
                 break;
@@ -1875,7 +1879,6 @@ public class CodeGenerator
     }
 
     private void handleIntegerBinaryOp(Bin e, Register targetReg) {
-        System.err.println("handleIntegerBinaryOp " + e);
         // 为左操作数分配寄存器
         TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "bin_left");
         context.recordRegisterAllocation(targetReg);
