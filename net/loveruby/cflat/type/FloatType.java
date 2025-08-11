@@ -45,13 +45,14 @@ public class FloatType extends Type {
 
     @Override
     public boolean isCastableTo(Type target) {
-        if (target.isFloat() || target.isInt()) {
+        // 只允许 float 转换为 long
+        if (target.isInteger() && target.size() == 8) { // long 类型
             return true;
         }
         return false;
     }
 
     public String toString() {
-        return "float64" + (size * 8);
+        return "float" + (size * 8);
     }
 }

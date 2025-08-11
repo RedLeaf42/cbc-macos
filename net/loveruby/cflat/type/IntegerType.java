@@ -12,17 +12,25 @@ public class IntegerType extends Type {
         this.name = name;
     }
 
-    public boolean isInteger() { return true; }
-    public boolean isSigned() { return isSigned; }
-    public boolean isScalar() { return true; }
+    public boolean isInteger() {
+        return true;
+    }
+
+    public boolean isSigned() {
+        return isSigned;
+    }
+
+    public boolean isScalar() {
+        return true;
+    }
 
     public long minValue() {
-        return isSigned ? (long)-Math.pow(2, size * 8 - 1) : 0;
+        return isSigned ? (long) -Math.pow(2, size * 8 - 1) : 0;
     }
 
     public long maxValue() {
-        return isSigned ? (long)Math.pow(2, size * 8 - 1) - 1
-                        : (long)Math.pow(2, size * 8) - 1;
+        return isSigned ? (long) Math.pow(2, size * 8 - 1) - 1
+                : (long) Math.pow(2, size * 8) - 1;
     }
 
     public boolean isInDomain(long i) {
@@ -30,10 +38,11 @@ public class IntegerType extends Type {
     }
 
     // Use default #equals
-    //public boolean equals(Object other)
+    // public boolean equals(Object other)
 
     public boolean isSameType(Type other) {
-        if (! other.isInteger()) return false;
+        if (!other.isInteger())
+            return false;
         return equals(other.getIntegerType());
     }
 
@@ -42,7 +51,14 @@ public class IntegerType extends Type {
     }
 
     public boolean isCastableTo(Type target) {
-        return (target.isInteger() || target.isPointer());
+        if (target.isInteger() || target.isPointer()) {
+            return true;
+        }
+        // 支持整数类型转换为浮点数
+        if (target.isFloat()) {
+            return true;
+        }
+        return false;
     }
 
     public long size() {

@@ -314,11 +314,19 @@ class TypeChecker extends Visitor {
             node.setLeft(integralPromotedExpr(node.left()));
             node.setType(node.right().type());
         } else if (node.left().type().isFloat() || node.right().type().isFloat()) {
-            // 浮点数运算：暂时跳过类型检查，直接设置类型为左操作数的类型
-            if (node.left().type().isFloat()) {
+            // 浮点数运算：不允许混合运算，必须显式类型转换
+            if (node.left().type().isFloat() && node.right().type().isFloat()) {
+                // 两个都是浮点数，类型必须相同
+                if (!node.left().type().isSameType(node.right().type())) {
+                    error(node, "incompatible float types: " + node.left().type() + " and " + node.right().type());
+                    return;
+                }
                 node.setType(node.left().type());
             } else {
-                node.setType(node.right().type());
+                // 混合类型运算，需要显式类型转换
+                error(node, "mixed float and integer operations not allowed. Use explicit cast: " +
+                        node.left().type() + " " + node.operator() + " " + node.right().type());
+                return;
             }
         } else {
             expectsSameInteger(node);

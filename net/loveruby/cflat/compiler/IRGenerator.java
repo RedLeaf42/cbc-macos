@@ -743,7 +743,24 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
     }
 
     public Expr visit(CastNode node) {
-        if (node.isEffectiveCast()) {
+        Type sourceType = node.expr().type();
+        Type targetType = node.type();
+
+        // 处理类型转换
+        if (sourceType.isInteger() && targetType.isFloat()) {
+            // 整数转换为浮点数
+            return new net.loveruby.cflat.ir.Cast(asmType(targetType),
+                    transformExpr(node.expr()), sourceType, targetType);
+        } else if (sourceType.isFloat() && targetType.isInteger()) {
+            // 浮点数转换为整数（只允许转换为long）
+            if (targetType.size() == 8) { // long类型
+                return new Cast(asmType(targetType), transformExpr(node.expr()), sourceType, targetType);
+            } else {
+                error(node, "float can only be cast to long, not to " + targetType);
+                return transformExpr(node.expr());
+            }
+        } else if (node.isEffectiveCast()) {
+            // 其他有效的类型转换
             return new Uni(asmType(node.type()),
                     node.expr().type().isSigned() ? Op.S_CAST : Op.U_CAST,
                     transformExpr(node.expr()));

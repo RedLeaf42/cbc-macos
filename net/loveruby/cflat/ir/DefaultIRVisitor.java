@@ -88,4 +88,10 @@ public class DefaultIRVisitor<S, E> implements IRVisitor<S, E> {
     public E visit(Str s) {
         return null;
     }
+
+    @Override
+    public E visit(Cast s) {
+        s.expr().accept(this);
+        return null;
+    }
 }

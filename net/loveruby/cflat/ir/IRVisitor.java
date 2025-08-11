@@ -32,4 +32,6 @@ public interface IRVisitor<S, E> {
     public E visit(Float s);
 
     public E visit(Str s);
+
+    public E visit(Cast s);
 }

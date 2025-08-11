@@ -1314,6 +1314,8 @@ public class CodeGenerator
             return visit((Var) expr, targetRegister);
         } else if (expr instanceof net.loveruby.cflat.ir.Float) {
             return visit((net.loveruby.cflat.ir.Float) expr, targetRegister);
+        } else if (expr instanceof net.loveruby.cflat.ir.Cast) {
+            return visit((net.loveruby.cflat.ir.Cast) expr, targetRegister);
         } else if (expr instanceof Int) {
             return visit((Int) expr, targetRegister);
         } else if (expr instanceof Str) {
@@ -1432,7 +1434,6 @@ public class CodeGenerator
         } else {
             // 变量从栈或寄存器加载
             net.loveruby.cflat.asm.Register reg = registerMap.get(entity);
-
             if (reg != null) {
                 // 变量在寄存器中，直接移动到目标寄存器
                 System.err.println("Loading " + entity.name() + " from register " + reg);
@@ -1582,6 +1583,65 @@ public class CodeGenerator
         assembly.add(new Directive("\tadrp\t" + targetRegName + ", " + e.symbol().name() + "@PAGE"));
         assembly.add(new Directive(
                 "\tadd\t" + targetRegName + ", " + targetRegName + ", " + e.symbol().name() + "@PAGEOFF"));
+        return null;
+    }
+
+    public Void visit(net.loveruby.cflat.ir.Cast e, Register targetRegister) {
+        // 记录传入寄存器的分配，避免寄存器分配重复
+        System.err.println("Cast operation targetType: "+e.targetType() + " targetRegister: "+targetRegister.name());
+        TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "Cast");
+        context.recordRegisterAllocation(targetRegister);
+
+        // 处理类型转换
+        net.loveruby.cflat.type.Type sourceType = e.sourceType();
+        net.loveruby.cflat.type.Type targetType = e.targetType();
+
+        if (sourceType.isInteger() && targetType.isFloat()) {
+            // 整数转换为浮点数
+            String targetRegName = targetRegister.name();
+            if (targetRegName.startsWith("d")) {
+                // 目标寄存器是浮点寄存器
+                // 先将整数加载到临时整数寄存器
+                Register tempIntReg = allocateTempRegisterWithSpill(context, "cast_temp_int");
+                e.expr().accept(this, tempIntReg);
+                // 然后转换到浮点寄存器
+                assembly.add(new Directive("\tscvtf\t" + targetRegName + ", " + tempIntReg.name()));
+                releaseTempRegisterWithRestore(tempIntReg, context);
+            } else {
+                // 目标寄存器是整数寄存器，需要先转换到浮点寄存器
+                Register tempFloatReg = allocateFloatTempRegisterWithSpill(context, "cast_temp");
+                e.expr().accept(this, tempFloatReg);
+                assembly.add(new Directive("\tscvtf\t" + tempFloatReg.name() + ", " + tempFloatReg.name()));
+                assembly.add(new Directive("\tfmov\t" + targetRegName + ", " + tempFloatReg.name()));
+                releaseTempRegisterWithRestore(tempFloatReg, context);
+            }
+        } else if (sourceType.isFloat() && targetType.isInteger()) {
+            // 浮点数转换为整数（只允许转换为long）
+            if (targetType.size() == 8) { // long类型
+                String targetRegName = targetRegister.name();
+                if (targetRegName.startsWith("d")) {
+                    // 目标寄存器是浮点寄存器，需要先转换到整数寄存器
+                    Register tempIntReg = allocateTempRegisterWithSpill(context, "cast_temp_int");
+                    e.expr().accept(this, tempIntReg);
+                    assembly.add(new Directive("\tfcvtzs\t" + targetRegName + ", " + tempIntReg.name()));
+                    releaseTempRegisterWithRestore(tempIntReg, context);
+                } else {
+                    // 目标寄存器是整数寄存器
+                    // 先将浮点数加载到临时浮点寄存器
+                    Register tempFloatReg = allocateFloatTempRegisterWithSpill(context, "cast_temp");
+                    e.expr().accept(this, tempFloatReg);
+                    // 然后转换到目标整数寄存器
+                    assembly.add(new Directive("\tfcvtzs\t" + targetRegister.name() + ", " + tempFloatReg.name()));
+                    releaseTempRegisterWithRestore(tempFloatReg, context);
+                }
+            } else {
+                throw new Error("float can only be cast to long, not to " + targetType);
+            }
+        } else {
+            // 其他类型转换，暂时不支持
+            throw new Error("unsupported cast from " + sourceType + " to " + targetType);
+        }
+
         return null;
     }
 
