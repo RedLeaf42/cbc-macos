@@ -27,6 +27,6 @@ public class FloatTypeRef extends TypeRef {
 
     @Override
     public String toString() {
-        return "float" + (size * 8);
+        return "float64" + (size * 8);
     }
 }

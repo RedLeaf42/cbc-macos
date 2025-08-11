@@ -1542,7 +1542,7 @@ public class CodeGenerator
 
     public Void visit(net.loveruby.cflat.ir.Float e, Register targetRegister) {
         // 记录传入寄存器的分配，避免寄存器分配重复
-        TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "Float");
+        TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "Float64");
         context.recordRegisterAllocation(targetRegister);
 
         // 浮点数常量加载到指定寄存器

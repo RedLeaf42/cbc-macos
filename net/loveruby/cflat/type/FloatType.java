@@ -52,6 +52,6 @@ public class FloatType extends Type {
     }
 
     public String toString() {
-        return "float" + (size * 8);
+        return "float64" + (size * 8);
     }
 }

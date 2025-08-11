@@ -181,6 +181,12 @@ public class Parser {
     }
     // #@@}
 
+    // #@@range/floatValue{
+    private double floatValue(String image) {
+        return Double.parseDouble(image);
+    }
+    // #@@}
+
     // #@@range/characterCode{
     private long characterCode(String image) throws ParseException {
         String s = stringValue(image);
@@ -300,6 +306,7 @@ TOKEN: {
     | <SHORT    : "short">
     | <INT      : "int">
     | <LONG     : "long">
+    | <FLOAT    : "float64">
     | <STRUCT   : "struct">
     | <UNION    : "union">
     | <ENUM     : "enum">
@@ -339,6 +346,16 @@ TOKEN: {
     <INTEGER: ["1"-"9"] (["0"-"9"])* ("U")? ("L")?
             | "0" ["x", "X"] (["0"-"9", "a"-"f", "A"-"F"])+ ("U")? ("L")?
             | "0" (["0"-"7"])* ("U")? ("L")?
+            >
+}
+// #@@}
+
+// floating-point literals
+// #@@range/lex_float{
+TOKEN: {
+    <FLOAT_LITERAL: (["0"-"9"])+ "." (["0"-"9"])*
+            | (["0"-"9"])* "." (["0"-"9"])+
+            | (["0"-"9"])+ ("." (["0"-"9"])*)? (["e", "E"]) (["+", "-"])? (["0"-"9"])+
             >
 }
 // #@@}
@@ -797,6 +814,7 @@ TypeRef typeref_base():
     | t=<SHORT>         { return IntegerTypeRef.shortRef(location(t)); }
     | t=<INT>           { return IntegerTypeRef.intRef(location(t)); }
     | t=<LONG>          { return IntegerTypeRef.longRef(location(t)); }
+    | t=<FLOAT>         { return new FloatTypeRef(location(t), 8); }
     | LOOKAHEAD(2) t=<UNSIGNED> <CHAR>
         { return IntegerTypeRef.ucharRef(location(t)); }
     | LOOKAHEAD(2) t=<UNSIGNED> <SHORT>
@@ -1312,6 +1330,10 @@ ExprNode primary():
       t=<INTEGER>
         {
             return integerNode(location(t), t.image);
+        }
+    | t=<FLOAT_LITERAL>
+        {
+            return new FloatLiteralNode(location(t), new FloatTypeRef(location(t), 8), floatValue(t.image));
         }
     | t=<CHARACTER>
         {
