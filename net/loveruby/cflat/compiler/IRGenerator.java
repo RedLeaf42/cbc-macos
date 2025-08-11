@@ -597,7 +597,9 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
                     new Bin(right.type(), Op.MUL,
                             right, ptrBaseSize(leftType)));
         } else {
-            return new Bin(left.type(), op, left, right);
+            // 确保浮点数运算的结果类型正确
+            net.loveruby.cflat.asm.Type resultAsmType = asmType(leftType);
+            return new Bin(resultAsmType, op, left, right);
         }
     }
     // #@@}
@@ -630,7 +632,10 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
         // #@@range/BinaryOp_init_1{
         Expr right = transformExpr(node.right());
         Expr left = transformExpr(node.left());
-        Op op = Op.internBinary(node.operator(), node.type().isSigned());
+
+        // 对于浮点数运算，跳过isSigned检查
+        boolean isSigned = node.type().isFloat() ? false : node.type().isSigned();
+        Op op = Op.internBinary(node.operator(), isSigned);
         Type t = node.type();
         // #@@}
         Type r = node.right().type();
@@ -654,9 +659,10 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
         }
         // #@@}
         else {
-            // int + int
-            // #@@range/BinaryOp_int{
-            return new Bin(asmType(t), op, left, right);
+            // int + int 或 float + float
+            // 确保浮点数运算的结果类型正确
+            net.loveruby.cflat.asm.Type resultAsmType = asmType(t);
+            return new Bin(resultAsmType, op, left, right);
             // #@@}
         }
     }
@@ -668,7 +674,9 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
             // +expr -> expr
             return transformExpr(node.expr());
         } else {
-            return new Uni(asmType(node.type()),
+            // 确保一元运算的结果类型正确
+            net.loveruby.cflat.asm.Type resultAsmType = asmType(node.type());
+            return new Uni(resultAsmType,
                     Op.internUnary(node.operator()),
                     transformExpr(node.expr()));
         }
@@ -771,6 +779,13 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
         return new Str(asmType(node.type()), node.entry());
     }
 
+    public Expr visit(FloatLiteralNode node) {
+        // 对于浮点数字面量，生成Float节点，保持其浮点类型
+        // 使用asmType来确保生成正确的汇编类型
+        net.loveruby.cflat.asm.Type asmType = asmType(node.type());
+        return new net.loveruby.cflat.ir.Float(asmType, node.value(), node.type());
+    }
+
     //
     // Utilities
     //
@@ -851,12 +866,18 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
     private net.loveruby.cflat.asm.Type asmType(Type t) {
         if (t.isVoid())
             return int_t();
+        if (t.isFloat()) {
+            return net.loveruby.cflat.asm.Type.getFloatType(t.size());
+        }
         return net.loveruby.cflat.asm.Type.get(t.size());
     }
 
     private net.loveruby.cflat.asm.Type varType(Type t) {
         if (!t.isScalar()) {
             return null;
+        }
+        if (t.isFloat()) {
+            return net.loveruby.cflat.asm.Type.getFloatType(t.size());
         }
         return net.loveruby.cflat.asm.Type.get(t.size());
     }

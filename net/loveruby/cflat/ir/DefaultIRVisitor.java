@@ -1,6 +1,6 @@
 package net.loveruby.cflat.ir;
 
-public class DefaultIRVisitor<S,E> implements IRVisitor<S,E> {
+public class DefaultIRVisitor<S, E> implements IRVisitor<S, E> {
     @Override
     public S visit(ExprStmt s) {
         s.expr().accept(this);
@@ -9,9 +9,9 @@ public class DefaultIRVisitor<S,E> implements IRVisitor<S,E> {
 
     @Override
     public S visit(Assign s) {
-      s.rhs.accept(this);
-      s.lhs.accept(this);
-      return null;
+        s.rhs.accept(this);
+        s.lhs.accept(this);
+        return null;
     }
 
     @Override
@@ -52,7 +52,7 @@ public class DefaultIRVisitor<S,E> implements IRVisitor<S,E> {
 
     @Override
     public E visit(Call s) {
-        for (Expr e: s.args()) {
+        for (Expr e : s.args()) {
             e.accept(this);
         }
         return null;
@@ -76,6 +76,11 @@ public class DefaultIRVisitor<S,E> implements IRVisitor<S,E> {
 
     @Override
     public E visit(Int s) {
+        return null;
+    }
+
+    @Override
+    public E visit(Float s) {
         return null;
     }
 

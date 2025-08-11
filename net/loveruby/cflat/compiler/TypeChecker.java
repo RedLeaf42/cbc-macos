@@ -313,6 +313,13 @@ class TypeChecker extends Visitor {
             // promote integer for pointer calculation
             node.setLeft(integralPromotedExpr(node.left()));
             node.setType(node.right().type());
+        } else if (node.left().type().isFloat() || node.right().type().isFloat()) {
+            // 浮点数运算：暂时跳过类型检查，直接设置类型为左操作数的类型
+            if (node.left().type().isFloat()) {
+                node.setType(node.left().type());
+            } else {
+                node.setType(node.right().type());
+            }
         } else {
             expectsSameInteger(node);
         }

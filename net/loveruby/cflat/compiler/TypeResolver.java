@@ -1,4 +1,5 @@
 package net.loveruby.cflat.compiler;
+
 import net.loveruby.cflat.ast.*;
 import net.loveruby.cflat.entity.*;
 import net.loveruby.cflat.type.*;
@@ -37,8 +38,7 @@ public class TypeResolver extends Visitor
         for (TypeDefinition def : deftypes) {
             if (typeTable.isDefined(def.typeRef())) {
                 error(def, "duplicated type definition: " + def.typeRef());
-            }
-            else {
+            } else {
                 typeTable.put(def.typeRef(), def.definingType());
             }
         }
@@ -47,7 +47,8 @@ public class TypeResolver extends Visitor
 
     // #@@range/bindType{
     private void bindType(TypeNode n) {
-        if (n.isResolved()) return;
+        if (n.isResolved())
+            return;
         n.setType(typeTable.get(n.typeRef()));
     }
     // #@@}
@@ -72,7 +73,7 @@ public class TypeResolver extends Visitor
 
     // #@@range/resolveCompositeType{
     public void resolveCompositeType(CompositeTypeDefinition def) {
-        CompositeType ct = (CompositeType)typeTable.get(def.typeNode().typeRef());
+        CompositeType ct = (CompositeType) typeTable.get(def.typeNode().typeRef());
         if (ct == null) {
             throw new Error("cannot intern struct/union: " + def.name());
         }
@@ -176,6 +177,11 @@ public class TypeResolver extends Visitor
     }
 
     public Void visit(StringLiteralNode node) {
+        bindType(node.typeNode());
+        return null;
+    }
+
+    public Void visit(FloatLiteralNode node) {
         bindType(node.typeNode());
         return null;
     }

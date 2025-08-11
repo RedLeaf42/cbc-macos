@@ -32,6 +32,11 @@ public class CodeGenerator
             Register.X4, Register.X5, Register.X6, Register.X7
     };
 
+    private static final Register[] FLOAT_ARG_REGS = {
+            Register.D0, Register.D1, Register.D2, Register.D3,
+            Register.D4, Register.D5, Register.D6, Register.D7
+    };
+
     private final SymbolTable constSymbols = new SymbolTable(".LC");
     private final SymbolTable labelSymbols = new SymbolTable("L");
 
@@ -531,44 +536,29 @@ public class CodeGenerator
 
         int tempBase = shadow + stackArgs * 8;
 
-        // Pass1: L->R
+        // Pass1: L->R - 处理浮点数和整数参数
         for (int i = 0; i < total; ++i) {
-            args.get(i).accept(this, Register.X0); // 计算到x0
-            assembly.add(new Directive("\tstr\tx0, [sp, #" + (tempBase + i * 8L) + "]"));
-        }
-        TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
-                "Call");
-        Register tempRegister = allocateTempRegisterWithSpill(context, "call mov args");
-        // Pass2: L->R
-        for (int i = 0; i < total; ++i) {
-            long src = tempBase + i * 8L;
-            if (i == 0) {
-                assembly.add(new Directive("\tldr\tx0, [sp, #" + src + "]"));
-            } else {
-                assembly.add(new Directive("\tldr\t" + tempRegister + ", [sp, #" + src + "]"));
-            }
-
-            String dst;
-            if (i < ARG_REGS.length) {
-                dst = ARG_REGS[i].toString();
-                if (i != 0) {
-                    assembly.add(new Directive("\tmov\t" + dst + ", " + tempRegister));
+            Expr arg = args.get(i);
+            if (isFloatOperand(arg)) {
+                // 浮点数参数：直接加载到浮点寄存器
+                if (i < FLOAT_ARG_REGS.length) {
+                    arg.accept(this, FLOAT_ARG_REGS[i]);
+                } else {
+                    // 浮点数参数过多，需要存储到栈上
+                    arg.accept(this, Register.D0); // 临时使用d0
+                    assembly.add(new Directive("\tstr\td0, [sp, #" + (tempBase + i * 8L) + "]"));
                 }
             } else {
-                dst = tempRegister.toString();
-            }
-
-            // 可变参数：把所有可变参数push到shadow区域
-            if (isVar && i >= fixed) {
-                long sh = (i - fixed) * 8L;
-                assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + sh + "]"));
-            }
-            if (i >= ARG_REGS.length) {
-                long off = shadow + (long) (i - ARG_REGS.length) * 8;
-                assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + off + "]"));
+                // 整数参数：加载到整数寄存器
+                if (i < ARG_REGS.length) {
+                    arg.accept(this, ARG_REGS[i]);
+                } else {
+                    // 整数参数过多，需要存储到栈上
+                    arg.accept(this, Register.X0); // 临时使用x0
+                    assembly.add(new Directive("\tstr\tx0, [sp, #" + (tempBase + i * 8L) + "]"));
+                }
             }
         }
-        releaseTempRegisterWithRestore(tempRegister, context);
         if (e.isStaticCall()) {
             // 对于变长参数函数，我们需要特殊处理va_init调用
             if (e.function().name().equals("va_init")) {
@@ -579,14 +569,16 @@ public class CodeGenerator
         } else {
             // 对于间接函数调用，需要将函数地址加载到不同的寄存器，避免覆盖x0中的参数
             e.expr().accept(this, Register.X0); // callee -> x0
-            tempRegister = allocateTempRegisterWithSpill(context, "tmp pointer");
-            assembly.add(new Directive("\tmov\t" + tempRegister + ", x0")); // 将函数地址移动到CALL_TMP
+            TempRegisterAllocationContext context = new TempRegisterAllocationContext(
+                    registerAllocator.getSpillSlotCount(),
+                    "Call");
+            Register tempRegister = allocateTempRegisterWithSpill(context, "tmp pointer");
+            assembly.add(new Directive("\tmov\t" + tempRegister + ", x0")); // 将函数地址移动到临时寄存器
             // 现在需要将第一个参数重新加载到x0
-            // todo 严格来说这里是有语法错误的，这里会导致第一个表达式执行两次
             if (!e.args().isEmpty()) {
                 e.args().get(0).accept(this, Register.X0); // 重新加载第一个参数到x0
             }
-            assembly.add(new Directive("\tblr\t" + tempRegister)); // 使用CALL_TMP调用函数
+            assembly.add(new Directive("\tblr\t" + tempRegister)); // 使用临时寄存器调用函数
             releaseTempRegisterWithRestore(tempRegister, context);
         }
 
@@ -1006,9 +998,18 @@ public class CodeGenerator
     private void storeToVar(Var v, Register src) {
         Entity ent = v.entity();
         long sz = v.type().size();
+        boolean isFloat = ent.type().isFloat();
+
         if (localVarOffsets.containsKey(ent)) {
             long off = localVarOffsets.get(ent);
-            if (sz == 8) {
+            if (isFloat) {
+                // 浮点数变量，源寄存器应该是浮点寄存器
+                if (off >= 0) {
+                    assembly.add(new Directive("\tstr\t" + src + ", [x29, #" + off + "]"));
+                } else {
+                    assembly.add(new Directive("\tstr\t" + src + ", [x29, #-" + (-off) + "]"));
+                }
+            } else if (sz == 8) {
                 if (off >= 0) {
                     assembly.add(new Directive("\tstr\t" + src + ", [x29, #" + off + "]"));
                 } else {
@@ -1044,14 +1045,30 @@ public class CodeGenerator
             // 首先检查是否已经有局部变量偏移
             if (localVarOffsets.containsKey(ent)) {
                 long localOff = localVarOffsets.get(ent);
-                if (localOff >= 0) {
-                    assembly.add(new Directive("\tstr\t" + src + ", [x29, #" + localOff + "]"));
+                if (isFloat) {
+                    // 浮点数参数
+                    if (localOff >= 0) {
+                        assembly.add(new Directive("\tstr\t" + src + ", [x29, #" + localOff + "]"));
+                    } else {
+                        assembly.add(new Directive("\tstr\t" + src + ", [x29, #-" + (-localOff) + "]"));
+                    }
                 } else {
-                    assembly.add(new Directive("\tstr\t" + src + ", [x29, #-" + (-localOff) + "]"));
+                    // 整数参数
+                    if (localOff >= 0) {
+                        assembly.add(new Directive("\tstr\t" + src + ", [x29, #" + localOff + "]"));
+                    } else {
+                        assembly.add(new Directive("\tstr\t" + src + ", [x29, #-" + (-localOff) + "]"));
+                    }
                 }
             } else {
                 // 如果没有局部变量偏移，使用参数偏移
-                assembly.add(new Directive("\tstr\t" + src + ", [x29, #" + off + "]"));
+                if (isFloat) {
+                    // 浮点数参数
+                    assembly.add(new Directive("\tstr\t" + src + ", [x29, #" + off + "]"));
+                } else {
+                    // 整数参数
+                    assembly.add(new Directive("\tstr\t" + src + ", [x29, #" + off + "]"));
+                }
             }
         } else {
             // 对于外部符号，根据类型选择重定位方式
@@ -1065,7 +1082,13 @@ public class CodeGenerator
                 assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@GOTPAGE"));
                 assembly.add(new Directive("\tldr\tx0, [x0, " + symbolName + "@GOTPAGEOFF]"));
             }
-            assembly.add(new Directive("\tstr\t" + src + ", [x0]"));
+            if (isFloat) {
+                // 浮点数外部变量
+                assembly.add(new Directive("\tstr\t" + src + ", [x0]"));
+            } else {
+                // 整数外部变量
+                assembly.add(new Directive("\tstr\t" + src + ", [x0]"));
+            }
         }
     }
 
@@ -1213,15 +1236,8 @@ public class CodeGenerator
             System.err.println(errMessage);
 
             // 生成恢复代码：从栈上恢复寄存器内容
-            // 如果偏移量超过ARM64的限制，使用基址寄存器+偏移量的方式
-            if (absoluteOffset > 255) {
-                // 使用sp作为基址寄存器，偏移量相对于sp
-                assembly.add(new Directive("\tldr\t" + register + ", [sp, #" + relativeOffset + "]"));
-            } else {
-                // 使用x29作为基址寄存器，偏移量相对于x29
-                assembly.add(new Directive("\tldr\t" + register + ", [x29, #-" + absoluteOffset + "]"));
-            }
-
+            // 使用x29作为基址寄存器，偏移量相对于x29
+            assembly.add(new Directive("\tldr\t" + register + ", [x29, #-" + absoluteOffset + "]"));
             // 清理溢出状态（弹出栈顶）
             registerAllocator.clearSpill(register);
         } else {
@@ -1296,6 +1312,8 @@ public class CodeGenerator
             return visit((Uni) expr, targetRegister);
         } else if (expr instanceof Var) {
             return visit((Var) expr, targetRegister);
+        } else if (expr instanceof net.loveruby.cflat.ir.Float) {
+            return visit((net.loveruby.cflat.ir.Float) expr, targetRegister);
         } else if (expr instanceof Int) {
             return visit((Int) expr, targetRegister);
         } else if (expr instanceof Str) {
@@ -1418,7 +1436,20 @@ public class CodeGenerator
             if (reg != null) {
                 // 变量在寄存器中，直接移动到目标寄存器
                 System.err.println("Loading " + entity.name() + " from register " + reg);
-                assembly.add(new Directive("\tmov\t" + targetRegName + ", " + reg));
+                if (entity.type().isFloat() && targetRegister.name().startsWith("d")) {
+                    // 浮点数寄存器之间使用fmov指令
+                    assembly.add(new Directive("\tfmov\t" + targetRegName + ", " + reg));
+                } else if (entity.type().isFloat() && targetRegister.name().startsWith("x")) {
+                    // 浮点数寄存器移动到整数寄存器，需要特殊处理
+                    // 暂时跳过，因为printf需要的是浮点数值
+                    assembly.add(new Directive("\tmov\t" + targetRegName + ", " + reg));
+                } else if (!entity.type().isFloat() && targetRegister.name().startsWith("d")) {
+                    // 整数寄存器移动到浮点数寄存器，需要特殊处理
+                    assembly.add(new Directive("\tmov\t" + targetRegName + ", " + reg));
+                } else {
+                    // 整数寄存器之间使用mov指令
+                    assembly.add(new Directive("\tmov\t" + targetRegName + ", " + reg));
+                }
             } else if (spillOffsets.containsKey(entity)) {
                 // 变量溢出到栈上，从栈加载 - 根据变量类型使用正确的加载指令
                 long offset = spillOffsets.get(entity);
@@ -1466,14 +1497,77 @@ public class CodeGenerator
         TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "Int");
         context.recordRegisterAllocation(targetRegister);
 
-        // 整数常量加载到指定寄存器
+        // 检查目标寄存器是否是浮点寄存器
         String targetRegName = targetRegister.name();
-        long v = e.value();
-        if (e.type().size() == 4) {
-            // 32位整数：直接使用32位寄存器，不进行扩展
-            assembly.add(new Directive("\tmov\tw" + targetRegName.substring(1) + ", #" + (v & 0xFFFFFFFFL)));
+        boolean isFloatTarget = targetRegName.startsWith("d");
+
+        // 检查AST类型来确定是否为浮点数
+        boolean isFloatValue = e.astType() != null && e.astType().isFloat();
+
+        if (isFloatValue || isFloatTarget) {
+            // 浮点数处理
+            if (isFloatValue) {
+                // 这是一个浮点数字面量
+                double doubleValue = Double.longBitsToDouble(e.value());
+                if (doubleValue == 0.0) {
+                    assembly.add(new Directive("\tfmov\t" + targetRegName + ", #0.0"));
+                } else if (doubleValue == 1.0) {
+                    assembly.add(new Directive("\tfmov\t" + targetRegName + ", #1.0"));
+                } else if (doubleValue == 2.0) {
+                    assembly.add(new Directive("\tfmov\t" + targetRegName + ", #1.0"));
+                } else {
+                    // 对于复杂的浮点数，需要先加载到整数寄存器，然后移动到浮点寄存器
+                    // 这是ARM64的限制
+                    materializeImmediate64("x0", e.value(), false);
+                    assembly.add(new Directive("\tfmov\t" + targetRegName + ", x0"));
+                }
+            } else {
+                // 目标寄存器是浮点寄存器，但值不是浮点数
+                // 需要将整数值转换为浮点数
+                materializeImmediate64("x0", e.value(), false);
+                assembly.add(new Directive("\tfmov\t" + targetRegName + ", x0"));
+            }
         } else {
-            materializeImmediate64(targetRegName, v, false);
+            // 整数寄存器，使用原来的逻辑
+            long v = e.value();
+            if (e.type().size() == 4) {
+                // 32位整数：直接使用32位寄存器，不进行扩展
+                assembly.add(new Directive("\tmov\tw" + targetRegName.substring(1) + ", #" + (v & 0xFFFFFFFFL)));
+            } else {
+                materializeImmediate64(targetRegName, v, false);
+            }
+        }
+        return null;
+    }
+
+    public Void visit(net.loveruby.cflat.ir.Float e, Register targetRegister) {
+        // 记录传入寄存器的分配，避免寄存器分配重复
+        TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "Float");
+        context.recordRegisterAllocation(targetRegister);
+
+        // 浮点数常量加载到指定寄存器
+        String targetRegName = targetRegister.name();
+        double value = e.value();
+
+        if (targetRegName.startsWith("d")) {
+            // 目标寄存器是浮点寄存器
+            if (value == 0.0) {
+                assembly.add(new Directive("\tfmov\t" + targetRegName + ", #0.0"));
+            } else if (value == 1.0) {
+                assembly.add(new Directive("\tfmov\t" + targetRegName + ", #1.0"));
+            } else if (value == 2.0) {
+                assembly.add(new Directive("\tfmov\t" + targetRegName + ", #2.0"));
+            } else {
+                // 对于复杂的浮点数，需要先加载到整数寄存器，然后移动到浮点寄存器
+                // 这是ARM64的限制
+                long bits = Double.doubleToLongBits(value);
+                materializeImmediate64("x0", bits, false);
+                assembly.add(new Directive("\tfmov\t" + targetRegName + ", x0"));
+            }
+        } else {
+            // 目标寄存器是整数寄存器，需要将浮点数作为位模式加载
+            long bits = Double.doubleToLongBits(value);
+            materializeImmediate64(targetRegName, bits, false);
         }
         return null;
     }
@@ -1533,45 +1627,61 @@ public class CodeGenerator
 
         int tempBase = shadow + stackArgs * 8;
 
-        // Pass1: L->R - 计算所有参数到栈
+        // Pass1: L->R - 处理浮点数和整数参数
+        // 整数参数过多，需要存储到栈上
+        // 其实之前的two pass的实现是有问题的，如果命名参数超过8个的情况下，fixed参数的摆放问题应该重新考虑
+        Register stackTemp = allocateTempRegisterWithSpill(context, "Call");
+        Register stackTempFloat = allocateFloatTempRegisterWithSpill(context, "Call");
+        int floatIndex = -1;
+        int intIndex = -1;
         for (int i = 0; i < total; ++i) {
-            args.get(i).accept(this, Register.X0); // 计算到x0
-            assembly.add(new Directive("\tstr\tx0, [sp, #" + (tempBase + i * 8L) + "]"));
-        }
+            Expr arg = args.get(i);
+            if (isFloatOperand(arg)) {
+                floatIndex++;
+                // 浮点数参数：直接加载到浮点寄存器
+                if (floatIndex < FLOAT_ARG_REGS.length) {
+                    arg.accept(this, FLOAT_ARG_REGS[floatIndex]);
+                } else {
+                    // 浮点数参数过多，需要存储到栈上
+                    long off = shadow + (long) (i - ARG_REGS.length) * 8;
+                    arg.accept(this, stackTempFloat); // 临时使用d0
+                    assembly.add(new Directive("\tstr\t" + stackTempFloat.name() + ", [sp, #" + (off) + "]"));
 
-        Register tempRegister = allocateTempRegisterWithSpill(context, "call mov args");
-
-        // Pass2: L->R - 从栈移动到寄存器
-        for (int i = 0; i < total; ++i) {
-            long src = tempBase + i * 8L;
-            if (i == 0) {
-                assembly.add(new Directive("\tldr\tx0, [sp, #" + src + "]"));
-            } else {
-                assembly.add(new Directive("\tldr\t" + tempRegister + ", [sp, #" + src + "]"));
-            }
-
-            String dst;
-            if (i < ARG_REGS.length) {
-                dst = ARG_REGS[i].toString();
-                if (i != 0) {
-                    assembly.add(new Directive("\tmov\t" + dst + ", " + tempRegister));
+                }
+                String dst;
+                if (i < ARG_REGS.length) {
+                    dst = FLOAT_ARG_REGS[floatIndex].toString();
+                } else {
+                    dst = stackTempFloat.toString();
+                }
+                if (isVar && i >= fixed) {
+                    long sh = (i - fixed) * 8L;
+                    assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + sh + "]"));
                 }
             } else {
-                dst = tempRegister.toString();
-            }
-
-            // 可变参数：把所有可变参数push到shadow区域
-            if (isVar && i >= fixed) {
-                long sh = (i - fixed) * 8L;
-                assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + sh + "]"));
-            }
-            if (i >= ARG_REGS.length) {
-                long off = shadow + (long) (i - ARG_REGS.length) * 8;
-                assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + off + "]"));
+                // 整数参数：加载到整数寄存器
+                intIndex++;
+                if (i < ARG_REGS.length) {
+                    arg.accept(this, ARG_REGS[intIndex]);
+                } else {
+                    arg.accept(this, stackTemp); // 临时使用x0
+                    long off = shadow + (long) (i - ARG_REGS.length) * 8;
+                    assembly.add(new Directive("\tstr\t" + stackTemp.name() + ", [sp, #" + (off) + "]"));
+                }
+                String dst;
+                if (intIndex < ARG_REGS.length) {
+                    dst = ARG_REGS[intIndex].toString();
+                } else {
+                    dst = stackTemp.toString();
+                }
+                if (isVar && i >= fixed) {
+                    long sh = (i - fixed) * 8L;
+                    assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + sh + "]"));
+                }
             }
         }
-        releaseTempRegisterWithRestore(tempRegister, context);
-
+        releaseTempRegisterWithRestore(stackTemp, context);
+        releaseTempRegisterWithRestore(stackTempFloat, context);
         if (e.isStaticCall()) {
             // 对于变长参数函数，我们需要特殊处理va_init调用
             if (e.function().name().equals("va_init")) {
@@ -1581,13 +1691,8 @@ public class CodeGenerator
             assembly.add(new Directive("\tbl\t" + e.function().callingSymbol().toSource()));
         } else {
             // 对于间接函数调用，需要将函数地址加载到不同的寄存器，避免覆盖x0中的参数
-            e.expr().accept(this, Register.X0); // callee -> x0
-            tempRegister = allocateTempRegisterWithSpill(context, "tmp pointer");
-            assembly.add(new Directive("\tmov\t" + tempRegister + ", x0")); // 将函数地址移动到临时寄存器
-            // 现在需要将第一个参数重新加载到x0
-            if (!e.args().isEmpty()) {
-                e.args().get(0).accept(this, Register.X0); // 重新加载第一个参数到x0
-            }
+            Register tempRegister = allocateTempRegisterWithSpill(context, "tmp pointer");
+            e.expr().accept(this, tempRegister); // callee -> x0
             assembly.add(new Directive("\tblr\t" + tempRegister)); // 使用临时寄存器调用函数
             releaseTempRegisterWithRestore(tempRegister, context);
         }
@@ -1818,21 +1923,60 @@ public class CodeGenerator
     private void loadFromVar(Var v, String targetRegister) {
         Entity ent = v.entity();
         long sz = v.type().size();
+        boolean isFloat = ent.type().isFloat();
+
         if (registerAllocator.isInRegister(ent)) {
             Register register = registerAllocator.getRegister(ent);
-            assembly.add(new Directive("\tmov\tx0, " + register.name()));
-        } else if (localVarOffsets.containsKey(ent)) {
+            if (isFloat && targetRegister.startsWith("d")) {
+                // 浮点数寄存器之间直接移动
+                assembly.add(new Directive("\tfmov\t" + targetRegister + ", " + register.name()));
+                return;
+            } else if (isFloat && targetRegister.startsWith("x")) {
+                // 浮点数寄存器移动到整数寄存器，需要特殊处理
+                // 在ARM64中，不能直接用mov在浮点寄存器和整数寄存器之间移动
+                // 需要先将浮点数存储到栈上，然后作为位模式加载
+                assembly.add(new Directive("\tstr\t" + register.name() + ", [sp, #-16]!"));
+                assembly.add(new Directive("\tldr\t" + targetRegister + ", [sp], #16"));
+                return;
+            } else if (!isFloat && targetRegister.startsWith("d")) {
+                // 整数寄存器移动到浮点数寄存器，需要特殊处理
+                // 在ARM64中，不能直接用mov在整数寄存器和浮点寄存器之间移动
+                // 需要先将整数存储到栈上，然后作为位模式加载
+                assembly.add(new Directive("\tstr\t" + register.name() + ", [sp, #-16]!"));
+                assembly.add(new Directive("\tldr\t" + targetRegister + ", [sp], #16"));
+                return;
+            } else {
+                // 整数寄存器之间移动
+                assembly.add(new Directive("\tmov\t" + targetRegister + ", " + register.name()));
+                return;
+            }
+        }
+
+        // 对于不在寄存器中的变量，根据类型选择加载方式
+        if (localVarOffsets.containsKey(ent)) {
             long off = localVarOffsets.get(ent);
-            if (sz == 8) {
-                assembly.add(new Directive("\tldr\tx0, [x29, #" + off + "]"));
+            if (isFloat) {
+                if (targetRegister.startsWith("d")) {
+                    // 浮点数直接加载到浮点寄存器
+                    assembly.add(new Directive("\tldr\t" + targetRegister + ", [x29, #" + off + "]"));
+                } else {
+                    // 浮点数加载到整数寄存器（作为位模式）
+                    assembly.add(new Directive("\tldr\t" + targetRegister + ", [x29, #" + off + "]"));
+                }
+            } else if (sz == 8) {
+                assembly.add(new Directive("\tldr\t" + targetRegister + ", [x29, #" + off + "]"));
             } else if (sz == 4) {
-                assembly.add(new Directive("\tldr\tw0, [x29, #" + off + "]"));
+                assembly.add(new Directive("\tldr\t" + targetRegister + ", [x29, #" + off + "]"));
             } else if (sz == 2) {
-                assembly.add(new Directive("\tldrh\tw0, [x29, #" + off + "]"));
-                assembly.add(new Directive("\tsxth\tx0, w0"));
+                assembly.add(new Directive("\tldrh\t" + targetRegister + ", [x29, #" + off + "]"));
+                if (targetRegister.startsWith("x")) {
+                    assembly.add(new Directive("\tsxth\t" + targetRegister + ", " + targetRegister));
+                }
             } else if (sz == 1) {
-                assembly.add(new Directive("\tldrb\tw0, [x29, #" + off + "]"));
-                assembly.add(new Directive("\tsxtb\tx0, w0"));
+                assembly.add(new Directive("\tldrb\t" + targetRegister + ", [x29, #" + off + "]"));
+                if (targetRegister.startsWith("x")) {
+                    assembly.add(new Directive("\tsxtb\t" + targetRegister + ", " + targetRegister));
+                }
             } else {
                 errorHandler.error("unsupported load size: " + sz);
             }
@@ -1841,32 +1985,56 @@ public class CodeGenerator
             // 对于参数，优先从局部变量位置加载（如果存在）
             if (localVarOffsets.containsKey(ent)) {
                 long localOff = localVarOffsets.get(ent);
-                if (sz == 8) {
-                    assembly.add(new Directive("\tldr\tx0, [x29, #" + localOff + "]"));
+                if (isFloat) {
+                    if (targetRegister.startsWith("d")) {
+                        // 浮点数直接加载到浮点寄存器
+                        assembly.add(new Directive("\tldr\t" + targetRegister + ", [x29, #" + localOff + "]"));
+                    } else {
+                        // 浮点数加载到整数寄存器（作为位模式）
+                        assembly.add(new Directive("\tldr\t" + targetRegister + ", [x29, #" + localOff + "]"));
+                    }
+                } else if (sz == 8) {
+                    assembly.add(new Directive("\tldr\t" + targetRegister + ", [x29, #" + localOff + "]"));
                 } else if (sz == 4) {
-                    assembly.add(new Directive("\tldr\tw0, [x29, #" + localOff + "]"));
+                    assembly.add(new Directive("\tldr\t" + targetRegister + ", [x29, #" + localOff + "]"));
                 } else if (sz == 2) {
-                    assembly.add(new Directive("\tldrh\tw0, [x29, #" + localOff + "]"));
-                    assembly.add(new Directive("\tsxth\tx0, w0"));
+                    assembly.add(new Directive("\tldrh\t" + targetRegister + ", [x29, #" + localOff + "]"));
+                    if (targetRegister.startsWith("x")) {
+                        assembly.add(new Directive("\tsxth\t" + targetRegister + ", " + targetRegister));
+                    }
                 } else if (sz == 1) {
-                    assembly.add(new Directive("\tldrb\tw0, [x29, #" + localOff + "]"));
-                    assembly.add(new Directive("\tsxtb\tx0, w0"));
+                    assembly.add(new Directive("\tldrb\t" + targetRegister + ", [x29, #" + localOff + "]"));
+                    if (targetRegister.startsWith("x")) {
+                        assembly.add(new Directive("\tsxtb\t" + targetRegister + ", " + targetRegister));
+                    }
                 } else {
                     errorHandler.error("unsupported load size: " + sz);
                 }
             } else {
                 // 在 ARM64 中，前 8 个参数通过寄存器传递
                 // 参数在栈上，从栈加载
-                if (sz == 8) {
-                    assembly.add(new Directive("\tldr\tx0, [x29, #" + off + "]"));
+                if (isFloat) {
+                    if (targetRegister.startsWith("d")) {
+                        // 浮点数直接加载到浮点寄存器
+                        assembly.add(new Directive("\tldr\t" + targetRegister + ", [x29, #" + off + "]"));
+                    } else {
+                        // 浮点数加载到整数寄存器（作为位模式）
+                        assembly.add(new Directive("\tldr\t" + targetRegister + ", [x29, #" + off + "]"));
+                    }
+                } else if (sz == 8) {
+                    assembly.add(new Directive("\tldr\t" + targetRegister + ", [x29, #" + off + "]"));
                 } else if (sz == 4) {
-                    assembly.add(new Directive("\tldr\tw0, [x29, #" + off + "]"));
+                    assembly.add(new Directive("\tldr\t" + targetRegister + ", [x29, #" + off + "]"));
                 } else if (sz == 2) {
-                    assembly.add(new Directive("\tldrh\tw0, [x29, #" + off + "]"));
-                    assembly.add(new Directive("\tsxth\tx0, w0"));
+                    assembly.add(new Directive("\tldrh\t" + targetRegister + ", [x29, #" + off + "]"));
+                    if (targetRegister.startsWith("x")) {
+                        assembly.add(new Directive("\tsxth\t" + targetRegister + ", " + targetRegister));
+                    }
                 } else if (sz == 1) {
-                    assembly.add(new Directive("\tldrb\tw0, [x29, #" + off + "]"));
-                    assembly.add(new Directive("\tsxtb\tx0, w0"));
+                    assembly.add(new Directive("\tldrb\t" + targetRegister + ", [x29, #" + off + "]"));
+                    if (targetRegister.startsWith("x")) {
+                        assembly.add(new Directive("\tsxtb\t" + targetRegister + ", " + targetRegister));
+                    }
                 } else {
                     errorHandler.error("unsupported load size: " + sz);
                 }
@@ -1907,22 +2075,33 @@ public class CodeGenerator
                 assembly.add(new Directive("\tadrp\tx0, " + symbolName + "@GOTPAGE"));
                 assembly.add(new Directive("\tldr\tx0, [x0, " + symbolName + "@GOTPAGEOFF]"));
             }
-            if (sz == 8) {
-                assembly.add(new Directive("\tldr\tx0, [x0]"));
+
+            // 从内存加载值
+            if (isFloat) {
+                if (targetRegister.startsWith("d")) {
+                    // 浮点数直接加载到浮点寄存器
+                    assembly.add(new Directive("\tldr\t" + targetRegister + ", [x0]"));
+                } else {
+                    // 浮点数加载到整数寄存器（作为位模式）
+                    assembly.add(new Directive("\tldr\t" + targetRegister + ", [x0]"));
+                }
+            } else if (sz == 8) {
+                assembly.add(new Directive("\tldr\t" + targetRegister + ", [x0]"));
             } else if (sz == 4) {
-                assembly.add(new Directive("\tldr\tw0, [x0]"));
+                assembly.add(new Directive("\tldr\t" + targetRegister + ", [x0]"));
             } else if (sz == 2) {
-                assembly.add(new Directive("\tldrh\tw0, [x0]"));
-                assembly.add(new Directive("\tsxth\tx0, w0"));
+                assembly.add(new Directive("\tldrh\t" + targetRegister + ", [x0]"));
+                if (targetRegister.startsWith("x")) {
+                    assembly.add(new Directive("\tsxth\t" + targetRegister + ", " + targetRegister));
+                }
             } else if (sz == 1) {
-                assembly.add(new Directive("\tldrb\tw0, [x0]"));
-                assembly.add(new Directive("\tsxtb\tx0, w0"));
+                assembly.add(new Directive("\tldrb\t" + targetRegister + ", [x0]"));
+                if (targetRegister.startsWith("x")) {
+                    assembly.add(new Directive("\tsxtb\t" + targetRegister + ", " + targetRegister));
+                }
             } else {
                 errorHandler.error("unsupported load size: " + sz);
             }
-        }
-        if (!targetRegister.equals("x0")) {
-            assembly.add(new Directive("\tmov " + targetRegister + ", x0"));
         }
     }
 
@@ -1962,6 +2141,23 @@ public class CodeGenerator
             case "x28" -> Register.X28;
             case "x29" -> Register.X29;
             case "x30" -> Register.X30;
+            // 浮点数寄存器
+            case "d0" -> Register.D0;
+            case "d1" -> Register.D1;
+            case "d2" -> Register.D2;
+            case "d3" -> Register.D3;
+            case "d4" -> Register.D4;
+            case "d5" -> Register.D5;
+            case "d6" -> Register.D6;
+            case "d7" -> Register.D7;
+            case "d8" -> Register.D8;
+            case "d9" -> Register.D9;
+            case "d10" -> Register.D10;
+            case "d11" -> Register.D11;
+            case "d12" -> Register.D12;
+            case "d13" -> Register.D13;
+            case "d14" -> Register.D14;
+            case "d15" -> Register.D15;
             default -> throw new Error("Unknown register name: " + name);
         };
     }

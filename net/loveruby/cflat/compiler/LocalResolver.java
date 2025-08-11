@@ -1,4 +1,5 @@
 package net.loveruby.cflat.compiler;
+
 import net.loveruby.cflat.ast.*;
 import net.loveruby.cflat.entity.*;
 import net.loveruby.cflat.utils.ErrorHandler;
@@ -95,9 +96,8 @@ public class LocalResolver extends Visitor {
         for (DefinedVariable var : vars) {
             if (scope.isDefinedLocally(var.name())) {
                 error(var.location(),
-                    "duplicated variable in scope: " + var.name());
-            }
-            else {
+                        "duplicated variable in scope: " + var.name());
+            } else {
                 scope.defineVariable(var);
             }
         }
@@ -107,7 +107,7 @@ public class LocalResolver extends Visitor {
 
     // #@@range/popScope{
     private LocalScope popScope() {
-        return (LocalScope)scopeStack.removeLast();
+        return (LocalScope) scopeStack.removeLast();
     }
     // #@@}
 
@@ -124,14 +124,20 @@ public class LocalResolver extends Visitor {
     }
     // #@@}
 
+    // #@@range/FloatLiteralNode{
+    public Void visit(FloatLiteralNode node) {
+        // 浮点数字面量不需要特殊处理，直接返回null
+        return null;
+    }
+    // #@@}
+
     // #@@range/VariableNode{
     public Void visit(VariableNode node) {
         try {
             Entity ent = currentScope().get(node.name());
             ent.refered();
             node.setEntity(ent);
-        }
-        catch (SemanticException ex) {
+        } catch (SemanticException ex) {
             error(node, ex.getMessage());
         }
         return null;

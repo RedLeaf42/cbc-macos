@@ -1,4 +1,5 @@
 package net.loveruby.cflat.compiler;
+
 import net.loveruby.cflat.ast.*;
 import net.loveruby.cflat.entity.DefinedVariable;
 import java.util.*;
@@ -225,6 +226,10 @@ abstract public class Visitor implements ASTVisitor<Void, Void> {
     }
 
     public Void visit(StringLiteralNode node) {
+        return null;
+    }
+
+    public Void visit(FloatLiteralNode node) {
         return null;
     }
 }

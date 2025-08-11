@@ -1,35 +1,47 @@
 package net.loveruby.cflat.type;
+
 import net.loveruby.cflat.ast.*;
 import net.loveruby.cflat.utils.ErrorHandler;
 import net.loveruby.cflat.exception.*;
 import java.util.*;
 
 public class TypeTable {
-    static public TypeTable ilp32() { return newTable(1, 2, 4, 4, 4); }
-    static public TypeTable ilp64() { return newTable(1, 2, 8, 8, 8); }
-    static public TypeTable lp64()  { return newTable(1, 2, 4, 8, 8); }
-    static public TypeTable llp64() { return newTable(1, 2, 4, 4, 8); }
+    static public TypeTable ilp32() {
+        return newTable(1, 2, 4, 4, 4);
+    }
+
+    static public TypeTable ilp64() {
+        return newTable(1, 2, 8, 8, 8);
+    }
+
+    static public TypeTable lp64() {
+        return newTable(1, 2, 4, 8, 8);
+    }
+
+    static public TypeTable llp64() {
+        return newTable(1, 2, 4, 4, 8);
+    }
 
     static private TypeTable newTable(int charsize, int shortsize,
-                                      int intsize, int longsize, int ptrsize) {
+            int intsize, int longsize, int ptrsize) {
         TypeTable table = new TypeTable(intsize, longsize, ptrsize);
         table.put(new VoidTypeRef(), new VoidType());
         table.put(IntegerTypeRef.charRef(),
-                  new IntegerType(charsize,  true, "char"));
+                new IntegerType(charsize, true, "char"));
         table.put(IntegerTypeRef.shortRef(),
-                  new IntegerType(shortsize, true, "short"));
+                new IntegerType(shortsize, true, "short"));
         table.put(IntegerTypeRef.intRef(),
-                  new IntegerType(intsize, true, "int"));
+                new IntegerType(intsize, true, "int"));
         table.put(IntegerTypeRef.longRef(),
-                  new IntegerType(longsize, true, "long"));
+                new IntegerType(longsize, true, "long"));
         table.put(IntegerTypeRef.ucharRef(),
-                  new IntegerType(charsize, false, "unsigned char"));
+                new IntegerType(charsize, false, "unsigned char"));
         table.put(IntegerTypeRef.ushortRef(),
-                  new IntegerType(shortsize, false, "unsigned short"));
+                new IntegerType(shortsize, false, "unsigned short"));
         table.put(IntegerTypeRef.uintRef(),
-                  new IntegerType(intsize, false, "unsigned int"));
+                new IntegerType(intsize, false, "unsigned int"));
         table.put(IntegerTypeRef.ulongRef(),
-                  new IntegerType(longsize, false, "unsigned long"));
+                new IntegerType(longsize, false, "unsigned long"));
         return table;
     }
 
@@ -61,29 +73,31 @@ public class TypeTable {
         if (type == null) {
             if (ref instanceof UserTypeRef) {
                 // If unregistered UserType is used in program, it causes
-                // parse error instead of semantic error.  So we do not
+                // parse error instead of semantic error. So we do not
                 // need to handle this error.
-                UserTypeRef uref = (UserTypeRef)ref;
+                UserTypeRef uref = (UserTypeRef) ref;
                 throw new Error("undefined type: " + uref.name());
-            }
-            else if (ref instanceof PointerTypeRef) {
-                PointerTypeRef pref = (PointerTypeRef)ref;
+            } else if (ref instanceof PointerTypeRef) {
+                PointerTypeRef pref = (PointerTypeRef) ref;
                 Type t = new PointerType(pointerSize, get(pref.baseType()));
                 table.put(pref, t);
                 return t;
-            }
-            else if (ref instanceof ArrayTypeRef) {
-                ArrayTypeRef aref = (ArrayTypeRef)ref;
+            } else if (ref instanceof ArrayTypeRef) {
+                ArrayTypeRef aref = (ArrayTypeRef) ref;
                 Type t = new ArrayType(get(aref.baseType()),
-                                       aref.length(),
-                                       pointerSize);
+                        aref.length(),
+                        pointerSize);
                 table.put(aref, t);
                 return t;
-            }
-            else if (ref instanceof FunctionTypeRef) {
-                FunctionTypeRef fref = (FunctionTypeRef)ref;
+            } else if (ref instanceof FloatTypeRef) {
+                FloatTypeRef fref = (FloatTypeRef) ref;
+                Type t = new FloatType(fref.size());
+                table.put(fref, t);
+                return t;
+            } else if (ref instanceof FunctionTypeRef) {
+                FunctionTypeRef fref = (FunctionTypeRef) ref;
                 Type t = new FunctionType(get(fref.returnType()),
-                                          fref.params().internTypes(this));
+                        fref.params().internTypes(this));
                 table.put(fref, t);
                 return t;
             }
@@ -124,9 +138,12 @@ public class TypeTable {
     }
 
     protected String ptrDiffTypeName() {
-        if (signedLong().size == pointerSize) return "long";
-        if (signedInt().size == pointerSize) return "int";
-        if (signedShort().size == pointerSize) return "short";
+        if (signedLong().size == pointerSize)
+            return "long";
+        if (signedInt().size == pointerSize)
+            return "int";
+        if (signedShort().size == pointerSize)
+            return "short";
         throw new Error("must not happen: integer.size != pointer.size");
     }
 
@@ -143,39 +160,39 @@ public class TypeTable {
     }
 
     public VoidType voidType() {
-        return (VoidType)table.get(new VoidTypeRef());
+        return (VoidType) table.get(new VoidTypeRef());
     }
 
     public IntegerType signedChar() {
-        return (IntegerType)table.get(IntegerTypeRef.charRef());
+        return (IntegerType) table.get(IntegerTypeRef.charRef());
     }
 
     public IntegerType signedShort() {
-        return (IntegerType)table.get(IntegerTypeRef.shortRef());
+        return (IntegerType) table.get(IntegerTypeRef.shortRef());
     }
 
     public IntegerType signedInt() {
-        return (IntegerType)table.get(IntegerTypeRef.intRef());
+        return (IntegerType) table.get(IntegerTypeRef.intRef());
     }
 
     public IntegerType signedLong() {
-        return (IntegerType)table.get(IntegerTypeRef.longRef());
+        return (IntegerType) table.get(IntegerTypeRef.longRef());
     }
 
     public IntegerType unsignedChar() {
-        return (IntegerType)table.get(IntegerTypeRef.ucharRef());
+        return (IntegerType) table.get(IntegerTypeRef.ucharRef());
     }
 
     public IntegerType unsignedShort() {
-        return (IntegerType)table.get(IntegerTypeRef.ushortRef());
+        return (IntegerType) table.get(IntegerTypeRef.ushortRef());
     }
 
     public IntegerType unsignedInt() {
-        return (IntegerType)table.get(IntegerTypeRef.uintRef());
+        return (IntegerType) table.get(IntegerTypeRef.uintRef());
     }
 
     public IntegerType unsignedLong() {
-        return (IntegerType)table.get(IntegerTypeRef.ulongRef());
+        return (IntegerType) table.get(IntegerTypeRef.ulongRef());
     }
 
     public PointerType pointerTo(Type baseType) {
@@ -188,11 +205,10 @@ public class TypeTable {
             // because the type refered from UserType must be also
             // kept in this table.
             if (t instanceof CompositeType) {
-                checkVoidMembers((CompositeType)t, h);
-                checkDuplicatedMembers((CompositeType)t, h);
-            }
-            else if (t instanceof ArrayType) {
-                checkVoidMembers((ArrayType)t, h);
+                checkVoidMembers((CompositeType) t, h);
+                checkDuplicatedMembers((CompositeType) t, h);
+            } else if (t instanceof ArrayType) {
+                checkVoidMembers((ArrayType) t, h);
             }
             checkRecursiveDefinition(t, h);
         }
@@ -232,30 +248,26 @@ public class TypeTable {
     static final protected Object checked = new Object();
 
     protected void _checkRecursiveDefinition(Type t,
-                                             Map<Type, Object> marks,
-                                             ErrorHandler h) {
+            Map<Type, Object> marks,
+            ErrorHandler h) {
         if (marks.get(t) == checking) {
-            h.error(((NamedType)t).location(),
+            h.error(((NamedType) t).location(),
                     "recursive type definition: " + t);
             return;
-        }
-        else if (marks.get(t) == checked) {
+        } else if (marks.get(t) == checked) {
             return;
-        }
-        else {
+        } else {
             marks.put(t, checking);
             if (t instanceof CompositeType) {
-                CompositeType ct = (CompositeType)t;
+                CompositeType ct = (CompositeType) t;
                 for (Slot s : ct.members()) {
                     _checkRecursiveDefinition(s.type(), marks, h);
                 }
-            }
-            else if (t instanceof ArrayType) {
-                ArrayType at = (ArrayType)t;
+            } else if (t instanceof ArrayType) {
+                ArrayType at = (ArrayType) t;
                 _checkRecursiveDefinition(at.baseType(), marks, h);
-            }
-            else if (t instanceof UserType) {
-                UserType ut = (UserType)t;
+            } else if (t instanceof UserType) {
+                UserType ut = (UserType) t;
                 _checkRecursiveDefinition(ut.realType(), marks, h);
             }
             marks.put(t, checked);
