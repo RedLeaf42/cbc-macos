@@ -300,6 +300,10 @@ public class RegisterAllocator {
         }
     }
 
+    public static final Register[] ARG_REGS = {
+            Register.X0, Register.X1, Register.X2, Register.X3,
+            Register.X4, Register.X5, Register.X6, Register.X7
+    };
     public void releaseTempRegister(Register register) {
         boolean valid = false;
         boolean isFloat = false;

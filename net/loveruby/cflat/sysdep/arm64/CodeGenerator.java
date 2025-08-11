@@ -9,6 +9,8 @@ import net.loveruby.cflat.utils.ErrorHandler;
 import java.util.*;
 import java.util.stream.Collectors;
 
+import static net.loveruby.cflat.sysdep.arm64.RegisterAllocator.ARG_REGS;
+
 /**
  * ARM64 CodeGenerator for macOS (Apple ABI)
  * - Variadic call: 64B shadow space for vararg tail only
@@ -27,10 +29,6 @@ public class CodeGenerator
     private final net.loveruby.cflat.asm.Type naturalType;
     private final net.loveruby.cflat.sysdep.CodeGeneratorOptions options;
 
-    private static final Register[] ARG_REGS = {
-            Register.X0, Register.X1, Register.X2, Register.X3,
-            Register.X4, Register.X5, Register.X6, Register.X7
-    };
 
     private static final Register[] FLOAT_ARG_REGS = {
             Register.D0, Register.D1, Register.D2, Register.D3,
@@ -501,97 +499,6 @@ public class CodeGenerator
     }
 
     /* ====== IR Visitor ====== */
-
-    public Void visit(Call e) {
-        boolean isVar = e.isStaticCall() &&
-                e.function().type().getFunctionType().isVararg();
-        List<Expr> args = e.args();
-        int total = args.size();
-        int fixed = 0;
-        if (e.isStaticCall()) {
-            fixed = e.function().type().getFunctionType().paramTypes().size();
-        }
-
-        // 优化：只保存实际使用到的caller-saved寄存器
-        boolean shouldSaveCallerRegister = !e.isStaticCall() || !e.function().name().equals("alloca");
-        Set<Register> usedCallerSaved = new HashSet<>();
-        if (shouldSaveCallerRegister) {
-            // 获取在函数调用点实际活跃的caller-saved寄存器
-            usedCallerSaved = registerAllocator.getLiveCallerSavedRegisters(currentStmt);
-            System.err.println("Live caller-saved registers at call site: "
-                    + usedCallerSaved.stream().map(Register::name).collect(Collectors.joining(", ")));
-
-            // 按寄存器对保存，保持16字节对齐
-            saveCallerSavedRegisters(usedCallerSaved);
-        }
-
-        int stackArgs = Math.max(0, total - ARG_REGS.length);
-        int shadow = isVar ? 8 * (total - fixed) : 0;
-        int temp = total * 8;
-        int block = shadow + stackArgs * 8 + temp;
-        block = (block + 15) & ~15;
-
-        if (block > 0)
-            assembly.add(new Directive("\tsub\tsp, sp, #" + block));
-
-        int tempBase = shadow + stackArgs * 8;
-
-        // Pass1: L->R - 处理浮点数和整数参数
-        for (int i = 0; i < total; ++i) {
-            Expr arg = args.get(i);
-            if (isFloatOperand(arg)) {
-                // 浮点数参数：直接加载到浮点寄存器
-                if (i < FLOAT_ARG_REGS.length) {
-                    arg.accept(this, FLOAT_ARG_REGS[i]);
-                } else {
-                    // 浮点数参数过多，需要存储到栈上
-                    arg.accept(this, Register.D0); // 临时使用d0
-                    assembly.add(new Directive("\tstr\td0, [sp, #" + (tempBase + i * 8L) + "]"));
-                }
-            } else {
-                // 整数参数：加载到整数寄存器
-                if (i < ARG_REGS.length) {
-                    arg.accept(this, ARG_REGS[i]);
-                } else {
-                    // 整数参数过多，需要存储到栈上
-                    arg.accept(this, Register.X0); // 临时使用x0
-                    assembly.add(new Directive("\tstr\tx0, [sp, #" + (tempBase + i * 8L) + "]"));
-                }
-            }
-        }
-        if (e.isStaticCall()) {
-            // 对于变长参数函数，我们需要特殊处理va_init调用
-            if (e.function().name().equals("va_init")) {
-                // va_init期望接收当前栈指针的值
-                assembly.add(new Directive("\tmov\tx0, sp"));
-            }
-            assembly.add(new Directive("\tbl\t" + e.function().callingSymbol().toSource()));
-        } else {
-            // 对于间接函数调用，需要将函数地址加载到不同的寄存器，避免覆盖x0中的参数
-            e.expr().accept(this, Register.X0); // callee -> x0
-            TempRegisterAllocationContext context = new TempRegisterAllocationContext(
-                    registerAllocator.getSpillSlotCount(),
-                    "Call");
-            Register tempRegister = allocateTempRegisterWithSpill(context, "tmp pointer");
-            assembly.add(new Directive("\tmov\t" + tempRegister + ", x0")); // 将函数地址移动到临时寄存器
-            // 现在需要将第一个参数重新加载到x0
-            if (!e.args().isEmpty()) {
-                e.args().get(0).accept(this, Register.X0); // 重新加载第一个参数到x0
-            }
-            assembly.add(new Directive("\tblr\t" + tempRegister)); // 使用临时寄存器调用函数
-            releaseTempRegisterWithRestore(tempRegister, context);
-        }
-
-        if (block > 0)
-            assembly.add(new Directive("\tadd\tsp, sp, #" + block));
-        if (shouldSaveCallerRegister) {
-            // 恢复caller-saved寄存器，使用ldp保持16字节对齐
-            restoreCallerSavedRegisters(usedCallerSaved);
-        }
-
-        return null;
-    }
-
     @Override
     public Void visit(Assign s) {
         TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
@@ -1686,7 +1593,6 @@ public class CodeGenerator
         if (block > 0)
             assembly.add(new Directive("\tsub\tsp, sp, #" + block));
 
-        int tempBase = shadow + stackArgs * 8;
 
         // Pass1: L->R - 处理浮点数和整数参数
         // 整数参数过多，需要存储到栈上
