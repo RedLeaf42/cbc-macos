@@ -21,7 +21,7 @@ public class TempRegisterAllocationContext {
         allocCount++;
         System.err.println("current allocCount = " + allocCount);
         if (allocCount > maxAllocCount) {
-            throw new IllegalStateException("you cannot own " + maxAllocCount + "in same function");
+            throw new IllegalStateException("you cannot own " + maxAllocCount + " in same function");
         }
     }
 

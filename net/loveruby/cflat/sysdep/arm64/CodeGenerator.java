@@ -3,7 +3,6 @@ package net.loveruby.cflat.sysdep.arm64;
 import net.loveruby.cflat.asm.*;
 import net.loveruby.cflat.entity.*;
 import net.loveruby.cflat.ir.*;
-import net.loveruby.cflat.type.FloatType;
 import net.loveruby.cflat.utils.ErrorHandler;
 
 import java.util.*;
@@ -28,7 +27,6 @@ public class CodeGenerator
     @SuppressWarnings("FieldCanBeLocal")
     private final net.loveruby.cflat.asm.Type naturalType;
     private final net.loveruby.cflat.sysdep.CodeGeneratorOptions options;
-
 
     private static final Register[] FLOAT_ARG_REGS = {
             Register.D0, Register.D1, Register.D2, Register.D3,
@@ -432,6 +430,7 @@ public class CodeGenerator
             len += sz;
             // 先设置为临时偏移，后面fix
             localVarOffsets.put(var, -len);
+            System.err.println("Allocated variable " + var.name() + " at offset " + (-len) + " (size: " + sz + ")");
         }
         // 递归分配子作用域，空间可重叠
         long maxLen = len;
@@ -501,8 +500,7 @@ public class CodeGenerator
     /* ====== IR Visitor ====== */
     @Override
     public Void visit(Assign s) {
-        TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
-                "Assign");
+        TempRegisterAllocationContext context = registerAllocator.makeTempRegisterContext("Assign");
         // 检查LHS是否是Var类型，且已分配寄存器
         if (s.lhs() instanceof Var var) {
             Entity ent = var.entity();
@@ -513,7 +511,7 @@ public class CodeGenerator
                 System.err.println("Storing to " + ent.name() + " in register " + reg);
 
                 // 使用RegisterAwareVisitor，直接将RHS计算到目标寄存器
-                Register targetReg = getRegisterByName(reg.toString());
+                Register targetReg = registerAllocator.getRegisterByName(reg.toString());
                 s.rhs().accept(this, targetReg);
                 return null;
             } else if (spillOffsets.containsKey(ent)) {
@@ -634,7 +632,7 @@ public class CodeGenerator
     }
 
     public Void visit(Switch s) {
-        TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
+        TempRegisterAllocationContext context = registerAllocator.makeTempRegisterContext(
                 "Switch");
         s.cond().accept(this, Register.X0);
         // 条件值现在在 x0 中
@@ -686,8 +684,7 @@ public class CodeGenerator
 
     private void evalAddressInto(Expr e, Register dstRegister) {
         String dst = dstRegister.name();
-        TempRegisterAllocationContext context = new TempRegisterAllocationContext(
-                registerAllocator.getSpillSlotCount() - 1, "evalAddressInto");
+        TempRegisterAllocationContext context = registerAllocator.makeTempRegisterContext("evalAddressInto");
         context.recordRegisterAllocation(dstRegister);
         if (e instanceof Addr) {
             addrOfEntityInto(((Addr) e).entity(), dst);
@@ -728,11 +725,13 @@ public class CodeGenerator
             if (op == Op.ADD || op == Op.SUB) {
                 evalAddressInto(b.left(), dstRegister); // base -> dst
                 // 使用临时寄存器计算右边的表达式，避免寄存器冲突
-                b.right().accept(this, Register.X0);
+                Register temp = allocateTempRegisterWithSpill(context, "evalAddressInto");
+                b.right().accept(this, temp);
                 if (op == Op.ADD)
-                    assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + "x0"));
+                    assembly.add(new Directive("\tadd\t" + dst + ", " + dst + ", " + temp.name()));
                 else
-                    assembly.add(new Directive("\tsub\t" + dst + ", " + dst + ", " + "x0"));
+                    assembly.add(new Directive("\tsub\t" + dst + ", " + dst + ", " + temp.name()));
+                releaseTempRegisterWithRestore(temp, context);
                 return;
             }
             // 对于其他操作，使用临时寄存器避免寄存器冲突
@@ -1275,7 +1274,7 @@ public class CodeGenerator
 
     public Void visit(Uni e, Register targetRegister) {
         // 记录传入寄存器的分配，避免寄存器分配重复
-        TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "Uni");
+        TempRegisterAllocationContext context = registerAllocator.makeTempRegisterContext("Uni");
         context.recordRegisterAllocation(targetRegister);
 
         // 一元操作：先计算操作数到目标寄存器，然后应用操作
@@ -1317,7 +1316,7 @@ public class CodeGenerator
 
     public Void visit(Var e, Register targetRegister) {
         // 记录传入寄存器的分配，避免寄存器分配重复
-        TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "Var");
+        TempRegisterAllocationContext context = registerAllocator.makeTempRegisterContext( "Var");
         context.recordRegisterAllocation(targetRegister);
 
         // 变量加载到指定寄存器
@@ -1391,6 +1390,15 @@ public class CodeGenerator
                         errorHandler.error("unsupported load size: " + sz);
                     }
                 }
+            } else if (entity.isDefined() && currentIR != null &&
+                    (currentIR.definedCommonSymbols().stream().anyMatch(v -> v.name().equals(entity.name())) ||
+                            currentIR.definedGlobalVariables().stream()
+                                    .anyMatch(v -> v.name().equals(entity.name())))) {
+                // 静态变量：先获取地址，然后加载值
+                System.err.println("Loading static variable " + entity.name() + " from address");
+                addrOfEntityInto(entity, targetRegName);
+                // 现在targetRegName包含地址，加载值
+                assembly.add(new Directive("\tldr\t" + targetRegName + ", [" + targetRegName + "]"));
             } else {
                 // 使用原有的栈访问方法
                 System.err.println("Loading " + entity.name() + " from stack");
@@ -1402,7 +1410,7 @@ public class CodeGenerator
 
     public Void visit(Int e, Register targetRegister) {
         // 记录传入寄存器的分配，避免寄存器分配重复
-        TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "Int");
+        TempRegisterAllocationContext context = registerAllocator.makeTempRegisterContext("Int");
         context.recordRegisterAllocation(targetRegister);
 
         // 检查目标寄存器是否是浮点寄存器
@@ -1450,7 +1458,7 @@ public class CodeGenerator
 
     public Void visit(net.loveruby.cflat.ir.Float e, Register targetRegister) {
         // 记录传入寄存器的分配，避免寄存器分配重复
-        TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "Float64");
+        TempRegisterAllocationContext context = registerAllocator.makeTempRegisterContext("Float64");
         context.recordRegisterAllocation(targetRegister);
 
         // 浮点数常量加载到指定寄存器
@@ -1482,7 +1490,7 @@ public class CodeGenerator
 
     public Void visit(Str e, Register targetRegister) {
         // 记录传入寄存器的分配，避免寄存器分配重复
-        TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "Str");
+        TempRegisterAllocationContext context = registerAllocator.makeTempRegisterContext("Str");
         context.recordRegisterAllocation(targetRegister);
 
         // 字符串地址加载到指定寄存器
@@ -1497,7 +1505,7 @@ public class CodeGenerator
         // 记录传入寄存器的分配，避免寄存器分配重复
         System.err
                 .println("Cast operation targetType: " + e.targetType() + " targetRegister: " + targetRegister.name());
-        TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "Cast");
+        TempRegisterAllocationContext context = registerAllocator.makeTempRegisterContext("Cast");
         context.recordRegisterAllocation(targetRegister);
 
         // 处理类型转换
@@ -1555,7 +1563,7 @@ public class CodeGenerator
 
     public Void visit(Call e, Register targetRegister) {
         // 记录传入寄存器的分配，避免寄存器分配重复
-        TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
+        TempRegisterAllocationContext context = registerAllocator.makeTempRegisterContext(
                 "Call");
         context.recordRegisterAllocation(targetRegister);
 
@@ -1593,7 +1601,6 @@ public class CodeGenerator
         if (block > 0)
             assembly.add(new Directive("\tsub\tsp, sp, #" + block));
 
-
         // Pass1: L->R - 处理浮点数和整数参数
         // 整数参数过多，需要存储到栈上
         // 其实之前的two pass的实现是有问题的，如果命名参数超过8个的情况下，fixed参数的摆放问题应该重新考虑
@@ -1601,8 +1608,12 @@ public class CodeGenerator
         Register stackTempFloat = allocateFloatTempRegisterWithSpill(context, "Call");
         int floatIndex = -1;
         int intIndex = -1;
+        System.err.println("Processing " + total + " arguments for function call");
+
         for (int i = 0; i < total; ++i) {
             Expr arg = args.get(i);
+            System.err.println("Processing argument " + i + ": " + arg.getClass().getSimpleName() + " (float: "
+                    + isFloatOperand(arg) + ")");
             if (isFloatOperand(arg)) {
                 floatIndex++;
                 // 浮点数参数：直接加载到浮点寄存器
@@ -1616,7 +1627,7 @@ public class CodeGenerator
 
                 }
                 String dst;
-                if (i < ARG_REGS.length) {
+                if (floatIndex < FLOAT_ARG_REGS.length) {
                     dst = FLOAT_ARG_REGS[floatIndex].toString();
                 } else {
                     dst = stackTempFloat.toString();
@@ -1628,7 +1639,7 @@ public class CodeGenerator
             } else {
                 // 整数参数：加载到整数寄存器
                 intIndex++;
-                if (i < ARG_REGS.length) {
+                if (intIndex < ARG_REGS.length) {
                     arg.accept(this, ARG_REGS[intIndex]);
                 } else {
                     arg.accept(this, stackTemp); // 临时使用x0
@@ -1681,7 +1692,7 @@ public class CodeGenerator
 
     public Void visit(Addr e, Register targetRegister) {
         // 记录传入寄存器的分配，避免寄存器分配重复
-        TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "Addr");
+        TempRegisterAllocationContext context = registerAllocator.makeTempRegisterContext("Addr");
         context.recordRegisterAllocation(targetRegister);
 
         // 取地址操作
@@ -1692,8 +1703,7 @@ public class CodeGenerator
 
     public Void visit(Mem e, Register targetRegister) {
         // 记录传入寄存器的分配，避免寄存器分配重复
-        TempRegisterAllocationContext context = new TempRegisterAllocationContext(registerAllocator.getSpillSlotCount(),
-                "Mem");
+        TempRegisterAllocationContext context = registerAllocator.makeTempRegisterContext("Mem");
         context.recordRegisterAllocation(targetRegister);
 
         // 内存访问
@@ -1746,13 +1756,13 @@ public class CodeGenerator
 
     private void handleFloatBinaryOp(Bin e, Register targetReg) {
         // 为左操作数分配浮点数寄存器
-        TempRegisterAllocationContext leftContext = new TempRegisterAllocationContext(2, "bin_left");
+        TempRegisterAllocationContext leftContext = registerAllocator.makeTempRegisterContext("bin_left");
         leftContext.recordRegisterAllocation(targetReg);
         Register leftReg = allocateFloatTempRegisterWithSpill(leftContext, "bin_left");
         e.left().accept(this, leftReg);
 
         // 为右操作数分配浮点数寄存器
-        TempRegisterAllocationContext rightContext = new TempRegisterAllocationContext(2, "bin_right");
+        TempRegisterAllocationContext rightContext = registerAllocator.makeTempRegisterContext("bin_right");
         Register rightReg = allocateFloatTempRegisterWithSpill(rightContext, "bin_right");
         e.right().accept(this, rightReg);
 
@@ -1786,7 +1796,7 @@ public class CodeGenerator
 
     private void handleIntegerBinaryOp(Bin e, Register targetReg) {
         // 为左操作数分配寄存器
-        TempRegisterAllocationContext context = new TempRegisterAllocationContext(2, "bin_left");
+        TempRegisterAllocationContext context = registerAllocator.makeTempRegisterContext("bin_left");
         context.recordRegisterAllocation(targetReg);
         Register leftReg = allocateTempRegisterWithSpill(context, "bin_left");
         e.left().accept(this, leftReg);
@@ -2073,62 +2083,4 @@ public class CodeGenerator
             }
         }
     }
-
-    /**
-     * 根据寄存器名称获取Register对象
-     */
-    private Register getRegisterByName(String name) {
-        return switch (name) {
-            case "x0" -> Register.X0;
-            case "x1" -> Register.X1;
-            case "x2" -> Register.X2;
-            case "x3" -> Register.X3;
-            case "x4" -> Register.X4;
-            case "x5" -> Register.X5;
-            case "x6" -> Register.X6;
-            case "x7" -> Register.X7;
-            case "x8" -> Register.X8;
-            case "x9" -> Register.X9;
-            case "x10" -> Register.X10;
-            case "x11" -> Register.X11;
-            case "x12" -> Register.X12;
-            case "x13" -> Register.X13;
-            case "x14" -> Register.X14;
-            case "x15" -> Register.X15;
-            case "x16" -> Register.X16;
-            case "x17" -> Register.X17;
-            case "x18" -> Register.X18;
-            case "x19" -> Register.X19;
-            case "x20" -> Register.X20;
-            case "x21" -> Register.X21;
-            case "x22" -> Register.X22;
-            case "x23" -> Register.X23;
-            case "x24" -> Register.X24;
-            case "x25" -> Register.X25;
-            case "x26" -> Register.X26;
-            case "x27" -> Register.X27;
-            case "x28" -> Register.X28;
-            case "x29" -> Register.X29;
-            case "x30" -> Register.X30;
-            // 浮点数寄存器
-            case "d0" -> Register.D0;
-            case "d1" -> Register.D1;
-            case "d2" -> Register.D2;
-            case "d3" -> Register.D3;
-            case "d4" -> Register.D4;
-            case "d5" -> Register.D5;
-            case "d6" -> Register.D6;
-            case "d7" -> Register.D7;
-            case "d8" -> Register.D8;
-            case "d9" -> Register.D9;
-            case "d10" -> Register.D10;
-            case "d11" -> Register.D11;
-            case "d12" -> Register.D12;
-            case "d13" -> Register.D13;
-            case "d14" -> Register.D14;
-            case "d15" -> Register.D15;
-            default -> throw new Error("Unknown register name: " + name);
-        };
-    }
-
 }

@@ -141,6 +141,10 @@ public class RegisterAllocator {
         return spillSlotCount;
     }
 
+    TempRegisterAllocationContext makeTempRegisterContext(String source) {
+        return new TempRegisterAllocationContext(totalTempRegisters.length, source);
+    }
+
     /**
      * 分配整数临时寄存器，如果池为空则返回null表示需要溢出
      */
@@ -1465,5 +1469,62 @@ public class RegisterAllocator {
         int tempSpillSlots = totalTempRegisters.length;
 
         return exprSpillSlots + tempSpillSlots;
+    }
+
+    /**
+     * 根据寄存器名称获取Register对象
+     */
+    Register getRegisterByName(String name) {
+        return switch (name) {
+            case "x0" -> Register.X0;
+            case "x1" -> Register.X1;
+            case "x2" -> Register.X2;
+            case "x3" -> Register.X3;
+            case "x4" -> Register.X4;
+            case "x5" -> Register.X5;
+            case "x6" -> Register.X6;
+            case "x7" -> Register.X7;
+            case "x8" -> Register.X8;
+            case "x9" -> Register.X9;
+            case "x10" -> Register.X10;
+            case "x11" -> Register.X11;
+            case "x12" -> Register.X12;
+            case "x13" -> Register.X13;
+            case "x14" -> Register.X14;
+            case "x15" -> Register.X15;
+            case "x16" -> Register.X16;
+            case "x17" -> Register.X17;
+            case "x18" -> Register.X18;
+            case "x19" -> Register.X19;
+            case "x20" -> Register.X20;
+            case "x21" -> Register.X21;
+            case "x22" -> Register.X22;
+            case "x23" -> Register.X23;
+            case "x24" -> Register.X24;
+            case "x25" -> Register.X25;
+            case "x26" -> Register.X26;
+            case "x27" -> Register.X27;
+            case "x28" -> Register.X28;
+            case "x29" -> Register.X29;
+            case "x30" -> Register.X30;
+            // 浮点数寄存器
+            case "d0" -> Register.D0;
+            case "d1" -> Register.D1;
+            case "d2" -> Register.D2;
+            case "d3" -> Register.D3;
+            case "d4" -> Register.D4;
+            case "d5" -> Register.D5;
+            case "d6" -> Register.D6;
+            case "d7" -> Register.D7;
+            case "d8" -> Register.D8;
+            case "d9" -> Register.D9;
+            case "d10" -> Register.D10;
+            case "d11" -> Register.D11;
+            case "d12" -> Register.D12;
+            case "d13" -> Register.D13;
+            case "d14" -> Register.D14;
+            case "d15" -> Register.D15;
+            default -> throw new Error("Unknown register name: " + name);
+        };
     }
 }

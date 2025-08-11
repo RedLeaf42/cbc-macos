@@ -6,6 +6,8 @@ public interface ASTVisitor<S, E> {
 
     public S visit(ExprStmtNode node);
 
+    public S visit(VarDeclStmtNode node);
+
     public S visit(IfNode node);
 
     public S visit(SwitchNode node);
