@@ -47,25 +47,25 @@ public class TypeResolver extends Visitor
 
     // #@@range/bindType{
     private void bindType(TypeNode n) {
-        System.err.println("=== bindType ===");
-        System.err.println("TypeNode: " + n);
-        System.err.println("TypeNode.isResolved: " + n.isResolved());
+//        System.err.println("=== bindType ===");
+//        System.err.println("TypeNode: " + n);
+//        System.err.println("TypeNode.isResolved: " + n.isResolved());
         if (n.isResolved()) {
-            System.err.println("TypeNode already resolved, type: " + n.type());
+//            System.err.println("TypeNode already resolved, type: " + n.type());
             return;
         }
 
-        System.err.println("TypeNode.typeRef: " + n.typeRef());
-        System.err.println("TypeNode.typeRef type: " + n.typeRef().getClass().getSimpleName());
+//        System.err.println("TypeNode.typeRef: " + n.typeRef());
+//        System.err.println("TypeNode.typeRef type: " + n.typeRef().getClass().getSimpleName());
 
         Type resolvedType = typeTable.get(n.typeRef());
-        System.err.println("typeTable.get result: " + resolvedType);
+//        System.err.println("typeTable.get result: " + resolvedType);
 
         n.setType(resolvedType);
 
-        System.err.println("After setType:");
-        System.err.println("TypeNode.isResolved: " + n.isResolved());
-        System.err.println("TypeNode.type: " + n.type());
+//        System.err.println("After setType:");
+//        System.err.println("TypeNode.isResolved: " + n.isResolved());
+//        System.err.println("TypeNode.type: " + n.type());
     }
     // #@@}
 
@@ -134,23 +134,23 @@ public class TypeResolver extends Visitor
 
     // #@@range/DefinedFunction{
     public Void visit(DefinedFunction func) {
-        System.err.println("=== TypeResolver.visit(DefinedFunction) ===");
-        System.err.println("Function: " + func.name());
-        System.err.println("Function typeNode: " + func.typeNode());
-        System.err.println("Function typeNode.isResolved: " + func.typeNode().isResolved());
-        if (func.typeNode().isResolved()) {
-            System.err.println("Function resolved type: " + func.typeNode().type());
-        }
+//        System.err.println("=== TypeResolver.visit(DefinedFunction) ===");
+//        System.err.println("Function: " + func.name());
+//        System.err.println("Function typeNode: " + func.typeNode());
+//        System.err.println("Function typeNode.isResolved: " + func.typeNode().isResolved());
+//        if (func.typeNode().isResolved()) {
+//            System.err.println("Function resolved type: " + func.typeNode().type());
+//        }
 
         resolveFunctionHeader(func);
 
-        System.err.println("After resolveFunctionHeader:");
-        System.err.println("Function typeNode.isResolved: " + func.typeNode().isResolved());
+//        System.err.println("After resolveFunctionHeader:");
+//        System.err.println("Function typeNode.isResolved: " + func.typeNode().isResolved());
         if (func.typeNode().isResolved()) {
-            System.err.println("Function resolved type: " + func.typeNode().type());
-            if (func.typeNode().type().isFunction()) {
-                System.err.println("Function type is callable: " + func.typeNode().type().isCallable());
-            }
+//            System.err.println("Function resolved type: " + func.typeNode().type());
+//            if (func.typeNode().type().isFunction()) {
+//                System.err.println("Function type is callable: " + func.typeNode().type().isCallable());
+//            }
         }
 
         visitStmt(func.body());
@@ -159,60 +159,60 @@ public class TypeResolver extends Visitor
     // #@@}
 
     public Void visit(UndefinedFunction func) {
-        System.err.println("=== TypeResolver.visit(UndefinedFunction) ===");
-        System.err.println("Function: " + func.name());
-        System.err.println("Function typeNode: " + func.typeNode());
-        System.err.println("Function typeNode.isResolved: " + func.typeNode().isResolved());
+//        System.err.println("=== TypeResolver.visit(UndefinedFunction) ===");
+//        System.err.println("Function: " + func.name());
+//        System.err.println("Function typeNode: " + func.typeNode());
+//        System.err.println("Function typeNode.isResolved: " + func.typeNode().isResolved());
 
         resolveFunctionHeader(func);
 
-        System.err.println("After resolveFunctionHeader:");
-        System.err.println("Function typeNode.isResolved: " + func.typeNode().isResolved());
-        if (func.typeNode().isResolved()) {
-            System.err.println("Function resolved type: " + func.typeNode().type());
-        }
+//        System.err.println("After resolveFunctionHeader:");
+//        System.err.println("Function typeNode.isResolved: " + func.typeNode().isResolved());
+//        if (func.typeNode().isResolved()) {
+//            System.err.println("Function resolved type: " + func.typeNode().type());
+//        }
 
         return null;
     }
 
     // #@@range/resolveFunctionHeader{
     private void resolveFunctionHeader(Function func) {
-        System.err.println("=== resolveFunctionHeader ===");
-        System.err.println("Function: " + func.name());
-        System.err.println("Before bindType:");
-        System.err.println("  typeNode: " + func.typeNode());
-        System.err.println("  typeNode.isResolved: " + func.typeNode().isResolved());
-        if (func.typeNode().isResolved()) {
-            System.err.println("  typeNode.type: " + func.typeNode().type());
-        }
+//        System.err.println("=== resolveFunctionHeader ===");
+//        System.err.println("Function: " + func.name());
+//        System.err.println("Before bindType:");
+//        System.err.println("  typeNode: " + func.typeNode());
+//        System.err.println("  typeNode.isResolved: " + func.typeNode().isResolved());
+//        if (func.typeNode().isResolved()) {
+//            System.err.println("  typeNode.type: " + func.typeNode().type());
+//        }
 
         bindType(func.typeNode());
 
-        System.err.println("After bindType:");
-        System.err.println("  typeNode.isResolved: " + func.typeNode().isResolved());
+//        System.err.println("After bindType:");
+//        System.err.println("  typeNode.isResolved: " + func.typeNode().isResolved());
         if (func.typeNode().isResolved()) {
-            System.err.println("  typeNode.type: " + func.typeNode().type());
-            if (func.typeNode().type().isFunction()) {
-                System.err.println(
-                        "  Function type returnType: " + func.typeNode().type().getFunctionType().returnType());
-                System.err.println(
-                        "  Function type paramTypes: " + func.typeNode().type().getFunctionType().paramTypes());
-            }
+//            System.err.println("  typeNode.type: " + func.typeNode().type());
+//            if (func.typeNode().type().isFunction()) {
+//                System.err.println(
+//                        "  Function type returnType: " + func.typeNode().type().getFunctionType().returnType());
+//                System.err.println(
+//                        "  Function type paramTypes: " + func.typeNode().type().getFunctionType().paramTypes());
+//            }
         }
 
         for (Parameter param : func.parameters()) {
-            System.err.println("Processing parameter: " + param.name());
-            System.err.println("  param.typeNode: " + param.typeNode());
-            System.err.println("  param.typeNode.isResolved: " + param.typeNode().isResolved());
+//            System.err.println("Processing parameter: " + param.name());
+//            System.err.println("  param.typeNode: " + param.typeNode());
+//            System.err.println("  param.typeNode.isResolved: " + param.typeNode().isResolved());
 
             // arrays must be converted to pointers in a function parameter.
             Type t = typeTable.getParamType(param.typeNode().typeRef());
-            System.err.println("  getParamType result: " + t);
+//            System.err.println("  getParamType result: " + t);
             param.typeNode().setType(t);
 
-            System.err.println("  After setType:");
-            System.err.println("    param.typeNode.isResolved: " + param.typeNode().isResolved());
-            System.err.println("    param.typeNode.type: " + param.typeNode().type());
+//            System.err.println("  After setType:");
+//            System.err.println("    param.typeNode.isResolved: " + param.typeNode().isResolved());
+//            System.err.println("    param.typeNode.type: " + param.typeNode().type());
         }
     }
     // #@@}
