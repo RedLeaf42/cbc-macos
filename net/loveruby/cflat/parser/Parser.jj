@@ -892,7 +892,7 @@ TypeRef typeref_base():
     | LOOKAHEAD(2) t=<UNSIGNED> <CHAR>
         { return IntegerTypeRef.ucharRef(location(t)); }
     | LOOKAHEAD(2) t=<UNSIGNED> <SHORT>
-        { return IntegerTypeRef.ucharRef(location(t)); }
+        { return IntegerTypeRef.ushortRef(location(t)); }
     | LOOKAHEAD(2) t=<UNSIGNED> <INT>
         { return IntegerTypeRef.uintRef(location(t)); }
     | t=<UNSIGNED> <LONG>
