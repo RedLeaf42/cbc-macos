@@ -15,4 +15,8 @@ public abstract class TypeRef {
     public int hashCode() {
         return toString().hashCode();
     }
+
+    public boolean isStruct() { return false; }
+    public boolean isClass() { return false; }
+    public boolean isUnion() { return false; }
 }

@@ -308,6 +308,7 @@ TOKEN: {
     | <LONG     : "long">
     | <FLOAT    : "float64">
     | <STRUCT   : "struct">
+    | <CLASS    : "class">
     | <UNION    : "union">
     | <ENUM     : "enum">
     | <STATIC   : "static">
@@ -415,6 +416,7 @@ Declarations declaration_file():
     UndefinedVariable vardecl;
     Constant defconst;
     StructNode defstruct;
+    StructNode defclass;
     UnionNode defunion;
     TypedefNode typedef;
 }
@@ -428,6 +430,7 @@ Declarations declaration_file():
     | vardecl=vardecl()     { decls.addVardecl(vardecl); }
     | defconst=defconst()   { decls.addConstant(defconst); }
     | defstruct=defstruct() { decls.addDefstruct(defstruct); }
+    | defclass=defclass()   { decls.addDefstruct(defclass); }
     | defunion=defunion()   { decls.addDefunion(defunion); }
     | typedef=typedef()     { decls.addTypedef(typedef); }
     )*
@@ -489,6 +492,7 @@ Declarations top_defs():
     List<DefinedVariable> defvars;
     Constant defconst;
     StructNode defstruct;
+    StructNode defclass;
     UnionNode defunion;
     TypedefNode typedef;
 }
@@ -499,6 +503,7 @@ Declarations top_defs():
       defvars=defvars()     { decls.addDefvars(defvars); }
     | defconst=defconst()   { decls.addConstant(defconst); }
     | defstruct=defstruct() { decls.addDefstruct(defstruct); }
+    | defclass=defclass()   { decls.addDefstruct(defclass); }
     | defunion=defunion()   { decls.addDefunion(defunion); }
     | typedef=typedef()     { decls.addTypedef(typedef); }
     )*
@@ -678,6 +683,21 @@ StructNode defstruct():
 }
 // #@@}
 
+// #@@range/defclass{
+StructNode defclass():
+{
+    Token t;
+    String n;
+    List<Slot> membs;
+}
+{
+    t=<CLASS> n=name() membs=member_list() ";"
+        {
+            return new StructNode(location(t), new ClassTypeRef(n), n, membs);
+        }
+}
+// #@@}
+
 UnionNode defunion():
 {
     Token t;
@@ -839,6 +859,8 @@ TypeRef typeref_base():
         { return IntegerTypeRef.ulongRef(location(t)); }
     | t=<STRUCT> name=<IDENTIFIER>
         { return new StructTypeRef(location(t), name.image); }
+    | t=<CLASS> name=<IDENTIFIER>
+        { return new ClassTypeRef(location(t), name.image); }
     | t=<UNION> name=<IDENTIFIER>
         { return new UnionTypeRef(location(t), name.image); }
     | LOOKAHEAD({isType(getToken(1).image)}) name=<IDENTIFIER>

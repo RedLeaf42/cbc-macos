@@ -641,8 +641,14 @@ class TypeChecker extends Visitor {
     }
 
     private boolean isInvalidParameterType(Type t) {
-        return t.isVoid() || t.isIncompleteArray();
-        // 移除了对 struct 和 union 的限制，允许它们作为函数参数
+        if (t.isVoid() || t.isIncompleteArray()) {
+            return true;
+        }
+        // class 类型只能作为指针参数传递
+        if (t.isClass()) {
+            return true; // class类型本身不能作为参数
+        }
+        return false;
     }
 
     private boolean isInvalidVariableType(Type t) {

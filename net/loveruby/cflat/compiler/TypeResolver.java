@@ -95,6 +95,14 @@ public class TypeResolver extends Visitor
         }
         for (Slot s : ct.members()) {
             bindType(s.typeNode());
+            // 检查struct中不能包含class
+            if (def instanceof StructNode) {
+                Type memberType = s.type();
+                if (memberType.isClass()) {
+                    errorHandler.error(def.location(), 
+                        "struct cannot contain class member: " + s.name());
+                }
+            }
         }
     }
     // #@@}

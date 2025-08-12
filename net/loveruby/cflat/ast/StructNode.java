@@ -17,7 +17,11 @@ public class StructNode extends CompositeTypeDefinition {
 
     // #@@range/definingType{
     public Type definingType() {
-        return new StructType(name(), members(), location());
+        if (typeRef() instanceof ClassTypeRef) {
+            return new ClassType(name(), members(), location());
+        } else {
+            return new StructType(name(), members(), location());
+        }
     }
     // #@@}
 
