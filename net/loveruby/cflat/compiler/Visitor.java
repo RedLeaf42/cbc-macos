@@ -237,4 +237,9 @@ abstract public class Visitor implements ASTVisitor<Void, Void> {
     public Void visit(FloatLiteralNode node) {
         return null;
     }
+
+    public Void visit(StructInitializerNode node) {
+        visitExprs(node.initializers());
+        return null;
+    }
 }

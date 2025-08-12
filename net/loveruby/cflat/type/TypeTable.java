@@ -72,10 +72,13 @@ public class TypeTable {
         Type type = table.get(ref);
         if (type == null) {
             if (ref instanceof UserTypeRef) {
-                // If unregistered UserType is used in program, it causes
-                // parse error instead of semantic error. So we do not
-                // need to handle this error.
+                // 智能类型查找：优先查找class，然后struct，最后typedef
                 UserTypeRef uref = (UserTypeRef) ref;
+                type = findTypeByName(uref.name());
+                if (type != null) {
+                    table.put(ref, type);
+                    return type;
+                }
                 throw new Error("undefined type: " + uref.name());
             } else if (ref instanceof PointerTypeRef) {
                 PointerTypeRef pref = (PointerTypeRef) ref;
@@ -157,6 +160,32 @@ public class TypeTable {
 
     public Collection<Type> types() {
         return table.values();
+    }
+
+    /**
+     * 智能查找类型：优先查找class，然后struct，最后typedef
+     * 这实现了class和struct关键字的可选性
+     */
+    private Type findTypeByName(String name) {
+        // 首先查找class类型
+        Type type = table.get(new ClassTypeRef(name));
+        if (type != null) {
+            return type;
+        }
+        
+        // 然后查找struct类型
+        type = table.get(new StructTypeRef(name));
+        if (type != null) {
+            return type;
+        }
+        
+        // 最后查找typedef类型
+        type = table.get(new UserTypeRef(name));
+        if (type != null) {
+            return type;
+        }
+        
+        return null;
     }
 
     public VoidType voidType() {

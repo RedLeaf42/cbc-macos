@@ -562,6 +562,42 @@ class TypeChecker extends Visitor {
         return null;
     }
 
+    public Void visit(StructInitializerNode node) {
+        // 根据类型名称查找结构体类型
+        Type structType = typeTable.get(new StructTypeRef(node.typeName()));
+        if (structType == null) {
+            error(node, "undefined struct: " + node.typeName());
+            return null;
+        }
+        
+        // 设置期望的类型
+        node.setExpectedType(structType);
+        
+        // 检查初始化器数量是否匹配结构体成员数量
+        StructType st = (StructType) structType;
+        if (node.initializers().size() != st.members().size()) {
+            error(node, "struct " + node.typeName() + " expects " + 
+                  st.members().size() + " initializers, got " + node.initializers().size());
+            return null;
+        }
+        
+        // 检查每个初始化器的类型是否匹配对应的成员类型
+        List<Slot> members = st.members();
+        List<ExprNode> inits = node.initializers();
+        for (int i = 0; i < members.size(); i++) {
+            visitExpr(inits.get(i));
+            Type memberType = members.get(i).type();
+            Type initType = inits.get(i).type();
+            
+            if (initType != null && !memberType.isCompatible(initType)) {
+                error(inits.get(i), "incompatible initializer type: expected " + 
+                      memberType + ", got " + initType);
+            }
+        }
+        
+        return null;
+    }
+
     //
     // Utilities
     //

@@ -79,6 +79,8 @@ public class Parser {
     private LibraryLoader loader;
     private ErrorHandler errorHandler;
     private Set<String> knownTypedefs;
+    private Set<String> knownClassTypes;
+    private Set<String> knownStructTypes;
     // #@@}
 
     // #@@range/ctor1{
@@ -96,6 +98,8 @@ public class Parser {
         this.loader = loader;
         this.errorHandler = errorHandler;
         this.knownTypedefs = new HashSet<String>();
+        this.knownClassTypes = new HashSet<String>();
+        this.knownStructTypes = new HashSet<String>();
         if (debug) {
             enable_tracing();
         }
@@ -145,7 +149,10 @@ public class Parser {
     }
 
     private boolean isType(String name) {
-        return knownTypedefs.contains(name);
+        boolean isTypedef = knownTypedefs.contains(name);
+        boolean isClass = knownClassTypes.contains(name);
+        boolean isStruct = knownStructTypes.contains(name);
+        return isTypedef || isClass || isStruct;
     }
 
     // #@@range/newReader{
@@ -498,14 +505,41 @@ Declarations top_defs():
 }
 {
     ( LOOKAHEAD(storage() typeref() <IDENTIFIER> "(")
-      defun=defun()         { decls.addDefun(defun); }
+      defun=defun()         
+        { 
+            decls.addDefun(defun); 
+        }
     | LOOKAHEAD(3)
-      defvars=defvars()     { decls.addDefvars(defvars); }
-    | defconst=defconst()   { decls.addConstant(defconst); }
-    | defstruct=defstruct() { decls.addDefstruct(defstruct); }
-    | defclass=defclass()   { decls.addDefstruct(defclass); }
-    | defunion=defunion()   { decls.addDefunion(defunion); }
-    | typedef=typedef()     { decls.addTypedef(typedef); }
+      {
+          System.err.println("DEBUG: top_defs: LOOKAHEAD(3) check - Token 1: " + getToken(1).image + 
+                           ", Token 2: " + getToken(2).image + 
+                           ", Token 3: " + getToken(3).image);
+          System.err.println("DEBUG: top_defs: Checking if Token 1 is a type: " + isType(getToken(1).image));
+      }
+      defvars=defvars()     
+        { 
+            decls.addDefvars(defvars); 
+                        }
+    | defconst=defconst()   
+        { 
+            decls.addConstant(defconst); 
+                        }
+    | defstruct=defstruct() 
+        { 
+            decls.addDefstruct(defstruct); 
+                        }
+    | defclass=defclass()   
+        { 
+            decls.addDefstruct(defclass); 
+                        }
+    | defunion=defunion()   
+        { 
+            decls.addDefunion(defunion); 
+                        }
+    | typedef=typedef()     
+        { 
+            decls.addTypedef(typedef); 
+                        }
     )*
         {
             return decls;
@@ -577,7 +611,9 @@ DefinedFunction defun():
 boolean storage():
 { Token t = null; }
 {
-    [t=<STATIC>] { return (t == null ? false : true); }
+    [t=<STATIC>] { 
+        return (t == null ? false : true); 
+    }
 }
 // #@@}
 
@@ -661,7 +697,7 @@ List<DefinedVariable> defvar_list():
     List<DefinedVariable> vars;
 }
 {
-    ( vars=defvars() { result.addAll(vars); } )*
+    ( LOOKAHEAD(storage() typeref() <IDENTIFIER> ("=" | "," | ";")) vars=defvars() { result.addAll(vars); } )*
         {
             return result;
         }
@@ -678,6 +714,7 @@ StructNode defstruct():
 {
     t=<STRUCT> n=name() membs=member_list() ";"
         {
+            knownStructTypes.add(n);
             return new StructNode(location(t), new StructTypeRef(n), n, membs);
         }
 }
@@ -693,6 +730,7 @@ StructNode defclass():
 {
     t=<CLASS> n=name() membs=member_list() ";"
         {
+            knownClassTypes.add(n);
             return new StructNode(location(t), new ClassTypeRef(n), n, membs);
         }
 }
@@ -768,7 +806,9 @@ UndefinedVariable vardecl():
 TypeNode type():
 { TypeRef ref; }
 {
-    ref=typeref() { return new TypeNode(ref); }
+    ref=typeref() { 
+        return new TypeNode(ref); 
+    }
 }
 // #@@}
 
@@ -852,7 +892,7 @@ TypeRef typeref_base():
     | LOOKAHEAD(2) t=<UNSIGNED> <CHAR>
         { return IntegerTypeRef.ucharRef(location(t)); }
     | LOOKAHEAD(2) t=<UNSIGNED> <SHORT>
-        { return IntegerTypeRef.ushortRef(location(t)); }
+        { return IntegerTypeRef.ucharRef(location(t)); }
     | LOOKAHEAD(2) t=<UNSIGNED> <INT>
         { return IntegerTypeRef.uintRef(location(t)); }
     | t=<UNSIGNED> <LONG>
@@ -864,7 +904,9 @@ TypeRef typeref_base():
     | t=<UNION> name=<IDENTIFIER>
         { return new UnionTypeRef(location(t), name.image); }
     | LOOKAHEAD({isType(getToken(1).image)}) name=<IDENTIFIER>
-        { return new UserTypeRef(location(name), name.image); }
+        { 
+            return new UserTypeRef(location(name), name.image); 
+        }
 }
 // #@@}
 
@@ -908,6 +950,7 @@ StmtNode stmt():
 {
     ( ";"
     | LOOKAHEAD(2) n=labeled_stmt()
+    | LOOKAHEAD(storage() typeref() <IDENTIFIER> ("=" | "," | ";")) vars=defvars() { n = new VarDeclStmtNode(location(token), vars); }
     | e=expr() ";" { n = new ExprStmtNode(e.location(), e); }
     | n=block()
     | n=if_stmt()
@@ -919,7 +962,6 @@ StmtNode stmt():
     | n=continue_stmt()
     | n=goto_stmt()
     | n=return_stmt()
-    | vars=defvars() { n = new VarDeclStmtNode(location(token), vars); }
     )
         {
             return n;
@@ -1361,8 +1403,9 @@ List<ExprNode> args():
 // #@@range/primary{
 ExprNode primary():
 {
-    Token t;
+    Token t, name;
     ExprNode n;
+    List<ExprNode> inits;
 }
 {
       t=<INTEGER>
@@ -1385,6 +1428,10 @@ ExprNode primary():
                 new PointerTypeRef(IntegerTypeRef.charRef()),
                 stringValue(t.image));
         }
+    | LOOKAHEAD(3) name=<IDENTIFIER> "{" inits=struct_init_list() "}"
+        {
+            return new StructInitializerNode(location(name), name.image, inits);
+        }
     | t=<IDENTIFIER>
         {
             return new VariableNode(location(t), t.image);
@@ -1392,6 +1439,21 @@ ExprNode primary():
     | "(" n=expr() ")"
         {
             return n;
+        }
+}
+// #@@}
+
+// #@@range/struct_init_list{
+List<ExprNode> struct_init_list():
+{
+    List<ExprNode> inits = new ArrayList<ExprNode>();
+    ExprNode init;
+}
+{
+    [ init=expr() { inits.add(init); }
+      ("," init=expr() { inits.add(init); })* ]
+        {
+            return inits;
         }
 }
 // #@@}

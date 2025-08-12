@@ -5,6 +5,7 @@ import net.loveruby.cflat.entity.*;
 import net.loveruby.cflat.type.Type;
 import net.loveruby.cflat.type.TypeTable;
 import net.loveruby.cflat.type.FunctionType;
+import net.loveruby.cflat.type.StructType;
 import net.loveruby.cflat.ir.*;
 import net.loveruby.cflat.asm.Label;
 import net.loveruby.cflat.utils.ErrorHandler;
@@ -1128,6 +1129,50 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
         // 使用asmType来确保生成正确的汇编类型
         net.loveruby.cflat.asm.Type asmType = asmType(node.type());
         return new net.loveruby.cflat.ir.Float(asmType, node.value(), node.type());
+    }
+
+    public Expr visit(StructInitializerNode node) {
+        // 获取结构体类型
+        Type structType = node.type();
+        if (structType == null) {
+            error(node, "struct type not resolved");
+            return null;
+        }
+        
+        if (!(structType instanceof StructType)) {
+            error(node, "expected struct type, got: " + structType);
+            return null;
+        }
+        
+        StructType st = (StructType) structType;
+        
+        // 创建临时变量来存储初始化的结构体
+        DefinedVariable tmp = tmpVar(structType);
+        
+        // 为每个成员生成赋值语句
+        List<ExprNode> initializers = node.initializers();
+        List<Slot> members = st.members();
+        
+        for (int i = 0; i < initializers.size(); i++) {
+            ExprNode initExpr = initializers.get(i);
+            Slot member = members.get(i);
+            
+            // 计算初始化表达式的值
+            Expr initValue = initExpr.accept(this);
+            
+            // 生成成员访问：tmp.memberName
+            Expr memberRef = new Mem(asmType(member.type()), 
+                                   new Bin(asmType(typeTable.pointerTo(member.type())),
+                                          Op.ADD,
+                                          addressOf(ref(tmp)),
+                                          new Int(asmType(typeTable.ptrDiffType()), member.offset())));
+            
+            // 生成赋值：tmp.memberName = initValue
+            assign(node.location(), memberRef, initValue);
+        }
+        
+        // 返回临时变量的地址，因为结构体通常按引用传递
+        return addressOf(ref(tmp));
     }
 
     //
