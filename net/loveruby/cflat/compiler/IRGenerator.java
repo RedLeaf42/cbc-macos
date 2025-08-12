@@ -194,25 +194,21 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
     public Void visit(BlockNode node) {
         scopeStack.add(node.scope());
 
-        // 1. 先收集所有变量到LocalScope中（为了栈空间计算）
+        // 1. 特殊处理 defvar_list 中的变量初始化
         for (DefinedVariable var : node.variables()) {
-            // 什么都不做，只是收集变量信息
+            if (var.hasInitializer()) {
+                // 生成初始化代码
+                assign(var.location(), ref(var), transformExpr(var.initializer()));
+            }
         }
 
         // 2. 按源代码顺序处理语句
         for (StmtNode s : node.stmts()) {
             if (s instanceof VarDeclStmtNode) {
-                // 遇到变量声明语句时，生成该变量的初始化代码
-                VarDeclStmtNode varDecl = (VarDeclStmtNode) s;
-                for (DefinedVariable var : varDecl.variables()) {
-                    if (var.hasInitializer()) {
-                        // 有初始化表达式的变量，在这里生成初始化代码
-                        assign(var.location(), ref(var), transformExpr(var.initializer()));
-                    }
-                    // 没有初始化表达式的变量，不需要生成代码
-                }
+                // 这是 stmts 中的变量声明，按原来的逻辑处理
+                transformStmt(s);
             } else {
-                // 其他类型的语句，使用原来的处理逻辑
+                // 其他语句，按原来的逻辑处理
                 transformStmt(s);
             }
         }
