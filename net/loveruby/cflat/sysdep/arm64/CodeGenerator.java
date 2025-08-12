@@ -748,7 +748,7 @@ public class CodeGenerator
                 assembly.add(new Directive("\tldrh\tw0, [" + dst + "]"));
                 assembly.add(new Directive("\tsxth\t" + dst + ", w0"));
             } else if (sz == 4) {
-                assembly.add(new Directive("\tldr\t" + dstRegister.bit32Name() + " [" + dst + "]"));
+                assembly.add(new Directive("\tldr\t" + dstRegister.bit32Name() + ", [" + dst + "]"));
             } else if (sz == 8) {
                 assembly.add(new Directive("\tldr\t" + dst + ", [" + dst + "]"));
             } else {
@@ -1701,159 +1701,13 @@ public class CodeGenerator
         int stackArgs = Math.max(0, total - ARG_REGS.length);
         int shadow = isVar ? 8 * (total - fixed) : 0;
 
-        // 为所有 struct 参数分配栈空间
-        long totalStructSize = 0;
-        boolean hasStruct = false;
-        for (int i = 0; i < total; ++i) {
-            Expr arg = args.get(i);
-            if (isStructOperand(arg)) {
-                hasStruct = true;
-                totalStructSize += getStructSize(arg);
-                // 这里保证每一个结构体都是8字节对齐的，避免因为对齐问题导致逻辑不符合预期
-                totalStructSize = (totalStructSize+7)&(~7);
-            }
-        }
-        // 确保16字节对齐
-        int block = shadow + stackArgs * 8 + (int) totalStructSize;
-        long currentStructOffset = 0L;
-        if (hasStruct) {
-            // 如果有结构体的情况下，要把参数都入栈，所以需要考虑参数空间，每一个按照8字节计算
-            block += (args.size() * 8);
-        }
+        // 统一的栈空间计算，不再区分结构体
+        int block = shadow + stackArgs * 8;
         block = (block + 15) & ~15;
         if (block > 0)
             assembly.add(new Directive("\tsub\tsp, sp, #" + block));
-        if (!hasStruct) {
-            placeCallArgumentsDirectly(e, context);
-        } else {
-            // 对于有结构体的情况，采取两趟处理方式
-            // 第一趟：把所有值都加载到栈上
-            // 栈布局：shadow + 溢出参数 + 求值临时区(每个8字节)
-
-            for (int i = 0; i < total; ++i) {
-                Expr arg = args.get(i);
-                Register stackTemp = allocateTempRegisterWithSpill(context, "Call");
-                Register stackTempFloat = allocateFloatTempRegisterWithSpill(context, "Call");
-
-                if (isFloatOperand(arg)) {
-                    // 浮点数：求值并存储到求值临时区
-                    arg.accept(this, stackTempFloat);
-                    long off = shadow + (long) (stackArgs) * 8 + (long) i * 8L;
-                    assembly.add(new Directive("\tstr\t" + stackTempFloat.name() + ", [sp, #" + (off) + "]"));
-                } else if (isStructOperand(arg)) {
-                    // 结构体：获取地址，然后使用 memcpy 拷贝到栈上
-                    long structSize = getStructSize(arg);
-                    if (arg instanceof Var var) {
-                        addrOfEntityInto(var.entity(), stackTemp.name());
-                    } else {
-                        // 对于其他类型的结构体表达式，需要求值获取地址
-                        arg.accept(this, stackTemp);
-                    }
-                    // 将地址存储到求值临时区
-                    long off = shadow + (long) (stackArgs) * 8 + (long) i * 8L;
-                    // 为结构体在栈上分配空间
-                    long structStackOffset = shadow + (long) (stackArgs) * 8 + (long) total * 8 + currentStructOffset;
-                    currentStructOffset += structSize;
-                    currentStructOffset  = (currentStructOffset + 7) & (~7);
-                    // 准备 memcpy 参数：目标地址、源地址、大小
-                    // 目标地址（栈上）
-                    assembly.add(new Directive("\tadd\tx0, sp, #" + structStackOffset));
-                    // 源地址
-                    assembly.add(new Directive("\tmov\tx1, " + stackTemp.name()));
-                    // 大小
-                    assembly.add(new Directive("\tmov\tx2, #" + structSize));
-                    // 调用 memcpy 拷贝结构体
-                    assembly.add(new Directive("\tbl\t_memcpy"));
-                    assembly.add(new Directive("\tadd\t"+stackTemp.name()+", sp, #"+structStackOffset));
-                    assembly.add(new Directive("\tstr\t" + stackTemp.name() + ", [sp, #" + (off) + "]"));
-                } else {
-                    // 整型：求值并存储到求值临时区
-                    arg.accept(this, stackTemp);
-                    long off = shadow + (long) (stackArgs) * 8 + (long) i * 8L;
-                    assembly.add(new Directive("\tstr\t" + stackTemp.name() + ", [sp, #" + (off) + "]"));
-                }
-
-                releaseTempRegisterWithRestore(stackTemp, context);
-                releaseTempRegisterWithRestore(stackTempFloat, context);
-            }
-
-            // 第二趟：把参数设置到正确的寄存器上，考虑溢出和变长参数逻辑
-            int floatIndex = -1;
-            int intIndex = -1;
-            int currentStructStackOffsetPass2 = 0;
-            Register stackTemp = allocateTempRegisterWithSpill(context, "CallPass2");
-            Register stackTempFloat = allocateFloatTempRegisterWithSpill(context, "CallPass2Float");
-            for (int i = 0; i < total; ++i) {
-                Expr arg = args.get(i);
-                if (isFloatOperand(arg)) {
-                    floatIndex++;
-                    if (floatIndex < FLOAT_ARG_REGS.length) {
-                        // 从求值临时区加载到浮点寄存器
-                        long off = shadow + (long) (stackArgs) * 8 + (long) i * 8L;
-                        assembly.add(new Directive(
-                                "\tldr\t" + FLOAT_ARG_REGS[floatIndex].name() + ", [sp, #" + (off) + "]"));
-                    } else {
-                        // 浮点数参数过多，需要存储到栈上
-                        long sourceOffset = shadow + (long) (stackArgs) * 8 + (long) i * 8L;
-                        long targetOff = shadow + (long) (i - ARG_REGS.length) * 8;
-                        new Directive("\tldr\t"+stackTempFloat.name() +", [sp, #"+sourceOffset);
-                        assembly.add(new Directive("\tstr\t" + stackTempFloat.name() + ", [sp, #" + (targetOff) + "]"));
-                    }
-
-                    // 处理变长参数
-                    if (isVar && i >= fixed) {
-                        long sh = (i - fixed) * 8L;
-                        String dst = floatIndex < FLOAT_ARG_REGS.length ? FLOAT_ARG_REGS[floatIndex].toString() : stackTempFloat.name();
-                        assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + sh + "]"));
-                    }
-                } else if (isStructOperand(arg)) {
-                    // 结构体：将栈上结构体的地址传递给函数
-                    intIndex++;
-                    long structStackOffset = shadow + (long) (stackArgs) * 8 + (long) total * 8 + currentStructOffset;
-                    currentStructOffset += getStructSize(arg);
-                    currentStructOffset = (currentStructOffset + 7) & ~7;
-                    if (intIndex < ARG_REGS.length) {
-                        // 将栈上结构体的地址加载到寄存器
-                        assembly.add(new Directive(
-                                "\tadd\t" + ARG_REGS[intIndex].name() + ", sp, #" + structStackOffset));
-                    } else {
-                        long targetOff = shadow + (long) (i - ARG_REGS.length) * 8;
-                        assembly.add(new Directive("\tldr\t"+stackTemp.name() +", [sp, #"+structStackOffset +"]"));
-                        assembly.add(new Directive("\tstr\t" + stackTemp.name() + ", [sp, #" + (targetOff) + "]"));
-                    }
-
-                    // 处理变长参数
-                    if (isVar && i >= fixed) {
-                        long sh = (i - fixed) * 8L;
-                        String dst = intIndex < ARG_REGS.length ? ARG_REGS[intIndex].toString() : stackTemp.name();
-                        assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + sh + "]"));
-                    }
-                } else {
-                    // 整型：从求值临时区加载到整数寄存器
-                    intIndex++;
-                    if (intIndex < ARG_REGS.length) {
-                        long off = shadow + (long) (total - ARG_REGS.length) * 8 + (long) i * 8L;
-                        assembly.add(new Directive("\tldr\t" + ARG_REGS[intIndex].name() + ", [sp, #" + (off) + "]"));
-                    } else {
-                        // 整型参数过多，已经在栈上，无需额外处理
-                        long sourceOffset = shadow + (long) (stackArgs) * 8 + (long) i * 8L;
-                        long targetOff = shadow + (long) (i - ARG_REGS.length) * 8;
-                        new Directive("\tldr\t"+stackTemp.name() +", [sp, #"+sourceOffset +"]");
-                        assembly.add(new Directive("\tstr\t" + stackTemp.name() + ", [sp, #" + (targetOff) + "]"));
-                    }
-
-                    // 处理变长参数
-                    if (isVar && i >= fixed) {
-                        long sh = (i - fixed) * 8L;
-                        String dst = intIndex < ARG_REGS.length ? ARG_REGS[intIndex].toString() : stackTemp.name();
-                        assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + sh + "]"));
-                    }
-                }
-            }
-            releaseTempRegisterWithRestore(stackTemp, context);
-            releaseTempRegisterWithRestore(stackTempFloat, context);
-        }
-
+        // 统一使用直接参数传递逻辑
+        placeCallArgumentsDirectly(e, context);
         if (e.isStaticCall()) {
             // 对于变长参数函数，我们需要特殊处理va_init调用
             if (e.function().name().equals("va_init")) {
@@ -1948,21 +1802,6 @@ public class CodeGenerator
         return false;
     }
 
-    private boolean isStructOperand(Expr expr) {
-        if (expr instanceof Var) {
-            Var var = (Var) expr;
-            return var.entity().type().isStruct() || var.entity().type().isUnion();
-        }
-        return false;
-    }
-
-    private long getStructSize(Expr expr) {
-        if (expr instanceof Var) {
-            Var var = (Var) expr;
-            return var.entity().type().size();
-        }
-        return 8; // 默认大小
-    }
 
     private void copyStructToStack(Register srcReg, long structSize, long offset) {
         // 设置 memcpy 参数

@@ -4,6 +4,7 @@ import net.loveruby.cflat.ast.*;
 import net.loveruby.cflat.entity.*;
 import net.loveruby.cflat.type.Type;
 import net.loveruby.cflat.type.TypeTable;
+import net.loveruby.cflat.type.FunctionType;
 import net.loveruby.cflat.ir.*;
 import net.loveruby.cflat.asm.Label;
 import net.loveruby.cflat.utils.ErrorHandler;
@@ -76,12 +77,23 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
 
     // #@@range/transformExpr{
     private int exprNestLevel = 0;
+    private Type currentExprType = null; // 当前表达式期望的类型
 
     private Expr transformExpr(ExprNode node) {
         exprNestLevel++;
         Expr e = node.accept(this);
         exprNestLevel--;
         return e;
+    }
+
+    private Expr transformExprWithType(ExprNode node, Type expectedType) {
+        Type prevType = currentExprType;
+        currentExprType = expectedType;
+        try {
+            return transformExpr(node);
+        } finally {
+            currentExprType = prevType;
+        }
     }
     // #@@}
 
@@ -105,6 +117,213 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
         }
     }
     // #@@}
+
+    /**
+     * 检查是否为结构体类型
+     */
+    private boolean isStructType(Type type) {
+        return type.isStruct();
+    }
+
+    /**
+     * 检查是否需要结构体拷贝
+     */
+    private boolean needsStructCopy(Expr expr, Type expectedType) {
+        if (!expectedType.isStruct()) {
+            return false;
+        }
+        
+        // 对于结构体类型的参数，总是需要拷贝（按值传递语义）
+        if (expr instanceof Var) {
+            Var var = (Var) expr;
+            return var.entity().type().isStruct(); // 结构体变量需要拷贝
+        }
+        
+        // 指针解引用也需要拷贝
+        return expr instanceof Mem || isPointerDereference(expr);
+    }
+
+    /**
+     * 检查表达式是否为指针解引用
+     */
+    private boolean isPointerDereference(Expr expr) {
+        if (expr instanceof Var) {
+            Var var = (Var) expr;
+            Entity entity = var.entity();
+            return entity.type().isPointer() && entity.type().baseType().isStruct();
+        }
+        return false;
+    }
+
+    /**
+     * 创建结构体复制
+     * 在函数调用时，为结构体参数创建副本
+     */
+    private Expr createStructCopy(Location loc, Expr structExpr, Type structType) {
+        // 1. 在栈上分配真正的结构体空间
+        // 直接使用传入的结构体类型
+        DefinedVariable structCopy = tmpVar(structType);
+
+        // 2. 生成复制代码
+        // 使用 memcpy 来复制结构体内容
+        insertStructMemcpy(loc, structCopy, structExpr, structType);
+
+        // 3. 返回指向复制的结构体的指针
+        // 因为函数期望接收指针参数
+        return addressOf(ref(structCopy));
+    }
+
+    /**
+     * 从表达式获取结构体类型
+     */
+    private Type getStructTypeFromExpr(Expr structExpr) {
+        // 优先使用类型上下文
+        if (currentExprType != null && currentExprType.isStruct()) {
+            return currentExprType;
+        }
+        
+        if (structExpr instanceof Var) {
+            Var var = (Var) structExpr;
+            return var.entity().type();
+        } else if (structExpr instanceof Mem) {
+            // 对于 Mem 节点，我们需要从地址表达式推断类型
+            // 这里我们尝试从地址表达式中获取基础类型
+            Mem mem = (Mem) structExpr;
+            Expr addrExpr = mem.expr();
+            if (addrExpr instanceof Bin) {
+                Bin bin = (Bin) addrExpr;
+                if (bin.op() == Op.ADD) {
+                    Expr base = bin.left();
+                    if (base instanceof Var) {
+                        Var baseVar = (Var) base;
+                        Entity entity = baseVar.entity();
+                        if (entity instanceof Parameter) {
+                            return entity.type().baseType(); // 解引用指针获取实际类型
+                        }
+                    }
+                }
+            } else if (addrExpr instanceof Var) {
+                // 直接解引用变量
+                Var addrVar = (Var) addrExpr;
+                Entity entity = addrVar.entity();
+                if (entity.type().isPointer()) {
+                    return entity.type().baseType();
+                }
+            }
+        }
+        // 如果无法获取，使用默认类型
+        return typeTable.signedInt();
+    }
+
+    /**
+     * 生成结构体赋值代码
+     */
+    private void generateStructAssignment(Location loc, Expr lhs, Expr rhs, Type structType) {
+        // 获取结构体大小
+        long size = structType.size();
+        
+        // 获取源和目标的地址
+        // 对于结构体，我们总是需要地址来进行内存拷贝
+        Expr srcAddr = getAddressOf(rhs);
+        Expr dstAddr = getAddressOf(lhs);
+        
+        // 生成逐字节拷贝的代码
+        for (long i = 0; i < size; i++) {
+            Expr srcByteAddr = new Bin(ptr_t(), Op.ADD, srcAddr, 
+                                      new Int(int_t(), i));
+            Expr srcByte = mem(srcByteAddr, typeTable.unsignedChar());
+            
+            Expr dstByteAddr = new Bin(ptr_t(), Op.ADD, dstAddr, 
+                                      new Int(int_t(), i));
+            Expr dstByte = mem(dstByteAddr, typeTable.unsignedChar());
+            
+            // 生成赋值：dst[i] = src[i]
+            stmts.add(new Assign(loc, dstByte, srcByte));
+        }
+    }
+    
+    /**
+     * 统一获取表达式的地址
+     */
+    private Expr getAddressOf(Expr expr) {
+        if (expr instanceof Var) {
+            // Var节点表示值，需要取地址
+            return addressOf(expr);
+        } else if (expr instanceof Mem) {
+            // Mem节点已经是内存访问，其expr部分就是地址
+            return ((Mem) expr).expr();
+        } else {
+            // 其他情况（如Bin等）应该已经是地址表达式
+            return expr;
+        }
+    }
+
+    /**
+     * 插入结构体 memcpy 操作
+     */
+    private void insertStructMemcpy(Location loc, DefinedVariable dest, Expr src, Type structType) {
+        // 获取 memcpy 函数
+        Entity memcpyFunc = getMemcpyEntity();
+        if (memcpyFunc == null) {
+            // 如果没有 memcpy，回退到逐字节复制
+            insertStructByteCopy(loc, dest, src, structType);
+            return;
+        }
+
+        // 直接使用传入的结构体类型获取大小
+        long structSize = structType.size();
+
+        // 生成 memcpy 调用
+        List<Expr> args = new ArrayList<>();
+        args.add(addressOf(ref(dest))); // 目标地址
+        args.add(addressOf(src)); // 源地址
+        args.add(new Int(int_t(), structSize)); // 大小
+
+        Call memcpyCall = new Call(asmType(typeTable.signedInt()), ref(memcpyFunc), args);
+        stmts.add(new ExprStmt(loc, memcpyCall));
+    }
+
+    /**
+     * 插入结构体逐字节复制操作
+     */
+    private void insertStructByteCopy(Location loc, DefinedVariable dest, Expr src, Type structType) {
+        // 直接使用传入的结构体类型获取大小
+        long structSize = structType.size();
+
+        // 为了简化，我们生成一个基本的复制操作
+        // 这里我们使用一个更直接的方法：直接复制结构体的内容
+
+        // 生成一个临时的指针变量来遍历源结构体
+        DefinedVariable srcPtr = tmpVar(typeTable.pointerTo(typeTable.signedChar()));
+        DefinedVariable destPtr = tmpVar(typeTable.pointerTo(typeTable.signedChar()));
+
+        // 初始化指针
+        stmts.add(new Assign(loc, ref(srcPtr), addressOf(src)));
+        stmts.add(new Assign(loc, ref(destPtr), addressOf(ref(dest))));
+
+        // 生成一个简单的循环来复制结构体
+        // 这里我们复制前几个字节作为示例
+        for (int i = 0; i < structSize; i++) {
+            // 复制第 i 个字节
+            stmts.add(new Assign(loc, mem(ref(destPtr), typeTable.signedChar()),
+                    mem(ref(srcPtr), typeTable.signedChar())));
+            // 递增指针
+            stmts.add(new Assign(loc, ref(srcPtr),
+                    new Bin(ptr_t(), Op.ADD, ref(srcPtr), new Int(ptr_t(), 1))));
+            stmts.add(new Assign(loc, ref(destPtr),
+                    new Bin(ptr_t(), Op.ADD, ref(destPtr), new Int(ptr_t(), 1))));
+        }
+    }
+
+
+    /**
+     * 获取 memcpy 函数实体
+     */
+    private Entity getMemcpyEntity() {
+        // 这里应该返回 memcpy 函数的 Entity
+        // 暂时返回 null，使用逐字节复制
+        return null;
+    }
 
     private DefinedVariable tmpVar(Type t) {
         return scopeStack.getLast().allocateTmp(t);
@@ -518,6 +737,26 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
     public Expr visit(AssignNode node) {
         Location lloc = node.lhs().location();
         Location rloc = node.rhs().location();
+        
+        // 检查是否为结构体赋值
+        if (node.lhs().type().isStruct() && node.rhs().type().isStruct()) {
+            // 结构体赋值需要生成拷贝代码
+            if (isStatement()) {
+                Expr rhs = transformExpr(node.rhs());
+                Expr lhs = transformExpr(node.lhs());
+                generateStructAssignment(lloc, lhs, rhs, node.lhs().type());
+                return null;
+            } else {
+                // 表达式形式的结构体赋值：需要返回左值
+                DefinedVariable tmp = tmpVar(node.lhs().type());
+                Expr rhs = transformExpr(node.rhs());
+                Expr lhs = transformExpr(node.lhs());
+                generateStructAssignment(lloc, lhs, rhs, node.lhs().type());
+                // 返回左值的地址
+                return lhs;
+            }
+        }
+        
         if (isStatement()) {
             // Evaluate RHS before LHS.
             // #@@range/Assign_stmt{
@@ -622,10 +861,47 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
 
     // #@@range/Funcall{
     public Expr visit(FuncallNode node) {
-        List<Expr> args = new ArrayList<Expr>();
-        for (ExprNode arg : ListUtils.reverse(node.args())) {
-            args.add(0, transformExpr(arg));
+        // 获取函数类型信息
+        List<Type> paramTypes = null;
+        
+        // 尝试从节点获取函数类型信息
+        try {
+            FunctionType funcType = node.functionType();
+            if (funcType != null) {
+                paramTypes = funcType.paramTypes();
+            }
+        } catch (Exception e) {
+            // 忽略错误，继续处理
         }
+        
+        List<Expr> args = new ArrayList<Expr>();
+        List<ExprNode> nodeArgs = node.args();
+        
+        // 正序处理参数，以便正确对应参数类型
+        for (int i = 0; i < nodeArgs.size(); i++) {
+            ExprNode argNode = nodeArgs.get(i);
+            Type expectedType = null;
+            
+            // 如果有参数类型信息，获取期望类型
+            if (paramTypes != null && i < paramTypes.size()) {
+                expectedType = paramTypes.get(i);
+            }
+            
+            Expr transformedArg;
+            if (expectedType != null && expectedType.isStruct()) {
+                // 对于结构体参数，传递类型上下文
+                transformedArg = transformExprWithType(argNode, expectedType);
+                if (needsStructCopy(transformedArg, expectedType)) {
+                    transformedArg = createStructCopy(node.location(), transformedArg, expectedType);
+                }
+            } else {
+                transformedArg = transformExpr(argNode);
+                }
+            
+            args.add(transformedArg);
+        }
+        
+        // 不再反转参数列表，保持正常顺序
 
         // 确保类型不为null，如果为null则使用默认类型
         Type callType = node.type();
@@ -737,15 +1013,14 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
     public Expr visit(MemberNode node) {
         Expr baseExpr = transformExpr(node.expr());
 
-        // 检查基础表达式是否已经是指针类型
-        // 如果是函数参数且类型是指针，则不需要再取地址
+        // 检查基础表达式是否已经是地址类型
         Expr expr;
         if (baseExpr instanceof Var) {
             Var var = (Var) baseExpr;
             Entity entity = var.entity();
-            if (entity instanceof Parameter) {
-                // 函数参数：直接使用，不需要取地址
-                // 因为函数参数在栈上，本身就是地址
+            if (entity instanceof Parameter && entity.type().isStruct()) {
+                // 结构体参数：现在传入的是指向拷贝的指针
+                // 直接使用这个指针，不需要再取地址
                 expr = baseExpr;
             } else {
                 // 普通变量，需要取地址
@@ -776,7 +1051,16 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
     // #@@range/Dereference{
     public Expr visit(DereferenceNode node) {
         Expr addr = transformExpr(node.expr());
-        return node.isLoadable() ? mem(addr, node.type()) : addr;
+        Type memType;
+        
+        // 如果有上下文类型信息，使用它
+        if (currentExprType != null) {
+            memType = currentExprType;
+        } else {
+            memType = node.type();
+        }
+        
+        return node.isLoadable() ? mem(addr, memType) : addr;
     }
     // #@@}
 
@@ -883,8 +1167,14 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
     private Var ref(Entity ent) {
         net.loveruby.cflat.asm.Type varAsmType = varType(ent.type());
         if (varAsmType == null) {
-            // 如果varType返回null（比如结构体类型），使用指针类型
-            varAsmType = ptr_t();
+            // 如果varType返回null，需要特殊处理
+            if (ent.type().isFunction()) {
+                // 函数类型使用指针类型
+                varAsmType = ptr_t();
+            } else {
+                // 结构体等其他类型，使用asmType保持类型信息
+                varAsmType = asmType(ent.type());
+            }
         }
         return new Var(varAsmType, ent);
     }
@@ -934,6 +1224,7 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
         if (t.isFloat()) {
             return net.loveruby.cflat.asm.Type.getFloatType(t.size());
         }
+        // 现在支持结构体类型
         return net.loveruby.cflat.asm.Type.get(t.size());
     }
 

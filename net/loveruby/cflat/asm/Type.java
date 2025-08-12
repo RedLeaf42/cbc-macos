@@ -1,7 +1,8 @@
 package net.loveruby.cflat.asm;
 
 public enum Type {
-    INT8, INT16, INT32, INT64, FLOAT32, FLOAT64;
+    INT8, INT16, INT32, INT64, FLOAT32, FLOAT64,
+    STRUCT; // 通用结构体类型
 
     static public Type get(long size) {
         switch ((int) size) {
@@ -14,7 +15,8 @@ public enum Type {
             case 8:
                 return INT64;
             default:
-                throw new Error("unsupported asm type size: " + size);
+                // 对于结构体和其他大类型，返回通用结构体类型
+                return STRUCT;
         }
     }
 
@@ -43,6 +45,10 @@ public enum Type {
                 return 4;
             case FLOAT64:
                 return 8;
+            case STRUCT:
+                // 结构体的大小是动态的，这里返回一个默认值
+                // 实际使用时应该通过其他方式获取真实大小
+                return 8; // 默认返回指针大小
             default:
                 throw new Error("must not happen");
         }

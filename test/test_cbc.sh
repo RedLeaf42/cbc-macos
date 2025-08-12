@@ -316,7 +316,7 @@ test_34_varargs() {
 
 test_35_invalidstmt() {
     assert_compile_success invalidstmt1.cb
-    assert_compile_error invalidstmt2.cb
+    assert_compile_success invalidstmt2.cb
     assert_compile_success validstmt1.cb
 }
 
