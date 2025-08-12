@@ -289,7 +289,6 @@ public class CodeGenerator
     }
 
     /**
-     *
      * 栈区设计
      * -----
      * 超过8个参数在栈上
@@ -303,7 +302,6 @@ public class CodeGenerator
      * 局部变量区
      * ----
      * 寄存器临时spill区域,当使用临时寄存器不够的时候就spill到这个区域
-     *
      */
     private void generateFunction(DefinedFunction func) {
         currentFunction = func;
@@ -510,9 +508,51 @@ public class CodeGenerator
                 // 变量在寄存器中，直接将RHS的结果放到目标寄存器
                 System.err.println("Storing to " + ent.name() + " in register " + reg);
 
-                // 使用RegisterAwareVisitor，直接将RHS计算到目标寄存器
-                Register targetReg = registerAllocator.getRegisterByName(reg.toString());
-                s.rhs().accept(this, targetReg);
+                // 检查是否为结构体赋值
+                if (ent.type().isStruct() || ent.type().isUnion()) {
+                    // 结构体赋值：使用 memcpy 进行拷贝
+                    System.err.println("Struct assignment detected: " + ent.name() + " = " + s.rhs());
+
+                    // 获取目标地址（LHS 的地址）
+                    Register targetAddrReg = allocateTempRegisterWithSpill(context, "struct_dst_addr");
+                    addrOfEntityInto(ent, targetAddrReg.name());
+
+                    // 获取源地址（RHS 的地址）
+                    Register srcAddrReg = allocateTempRegisterWithSpill(context, "struct_src_addr");
+                    if (s.rhs() instanceof Var) {
+                        // RHS 是变量，获取其地址
+                        Var rhsVar = (Var) s.rhs();
+                        addrOfEntityInto(rhsVar.entity(), srcAddrReg.name());
+                    } else {
+                        // RHS 是其他表达式，计算其地址
+                        s.rhs().accept(this, srcAddrReg);
+                    }
+
+                    // 调用 memcpy 进行结构体拷贝
+                    // 保存调用者保存的寄存器
+                    assembly.add(new Directive("\tstp\tx0, x1, [sp, #-16]!"));
+                    assembly.add(new Directive("\tstp\tx2, x3, [sp, #-16]!"));
+
+                    // 设置 memcpy 参数
+                    assembly.add(new Directive("\tmov\tx0, " + targetAddrReg.name())); // dst = 目标地址
+                    assembly.add(new Directive("\tmov\tx1, " + srcAddrReg.name())); // src = 源地址
+                    assembly.add(new Directive("\tmov\tx2, #" + ent.type().size())); // size = 结构体大小
+
+                    // 调用 memcpy
+                    assembly.add(new Directive("\tbl\t_memcpy"));
+
+                    // 恢复调用者保存的寄存器
+                    assembly.add(new Directive("\tldp\tx2, x3, [sp], #16"));
+                    assembly.add(new Directive("\tldp\tx0, x1, [sp], #16"));
+
+                    // 释放临时寄存器
+                    releaseTempRegisterWithRestore(targetAddrReg, context);
+                    releaseTempRegisterWithRestore(srcAddrReg, context);
+                } else {
+                    // 非结构体赋值：使用RegisterAwareVisitor，直接将RHS计算到目标寄存器
+                    Register targetReg = registerAllocator.getRegisterByName(reg.toString());
+                    s.rhs().accept(this, targetReg);
+                }
                 return null;
             } else if (spillOffsets.containsKey(ent)) {
                 // 变量溢出到栈上，计算RHS后存储 - 根据变量类型使用正确的存储指令
@@ -799,11 +839,7 @@ public class CodeGenerator
     private void addrOfEntityInto(Entity ent, String dst) {
         if (localVarOffsets.containsKey(ent)) {
             long off = localVarOffsets.get(ent);
-            if (off >= 0) {
-                assembly.add(new Directive("\tadd\t" + dst + ", x29, #" + off));
-            } else {
-                assembly.add(new Directive("\tsub\t" + dst + ", x29, #" + (-off)));
-            }
+            assembly.add(new Directive("\tadd\t" + dst + ", x29, #" + off));
         } else if (paramOffsets.containsKey(ent)) {
             long off = paramOffsets.get(ent);
             // 其他参数在栈上，使用正数偏移
@@ -1316,7 +1352,7 @@ public class CodeGenerator
 
     public Void visit(Var e, Register targetRegister) {
         // 记录传入寄存器的分配，避免寄存器分配重复
-        TempRegisterAllocationContext context = registerAllocator.makeTempRegisterContext( "Var");
+        TempRegisterAllocationContext context = registerAllocator.makeTempRegisterContext("Var");
         context.recordRegisterAllocation(targetRegister);
 
         // 变量加载到指定寄存器
@@ -1561,55 +1597,25 @@ public class CodeGenerator
         return null;
     }
 
-    public Void visit(Call e, Register targetRegister) {
-        // 记录传入寄存器的分配，避免寄存器分配重复
-        TempRegisterAllocationContext context = registerAllocator.makeTempRegisterContext(
-                "Call");
-        context.recordRegisterAllocation(targetRegister);
-
-        // 函数调用，结果放在指定寄存器
-        String targetRegName = targetRegister.name();
-
-        boolean isVar = e.isStaticCall() &&
-                e.function().type().getFunctionType().isVararg();
-        List<Expr> args = e.args();
-        int total = args.size();
-        int fixed = 0;
-        if (e.isStaticCall()) {
-            fixed = e.function().type().getFunctionType().paramTypes().size();
-        }
-
-        // 优化：只保存实际使用到的caller-saved寄存器
-        boolean shouldSaveCallerRegister = !e.isStaticCall() || !e.function().name().equals("alloca");
-        Set<Register> usedCallerSaved = new HashSet<>();
-        if (shouldSaveCallerRegister) {
-            // 获取在函数调用点实际活跃的caller-saved寄存器
-            usedCallerSaved = registerAllocator.getLiveCallerSavedRegisters(currentStmt);
-            System.err.println("Live caller-saved registers at call site: "
-                    + usedCallerSaved.stream().map(Register::name).collect(Collectors.joining(", ")));
-
-            // 按寄存器对保存，保持16字节对齐
-            saveCallerSavedRegisters(usedCallerSaved);
-        }
-
-        int stackArgs = Math.max(0, total - ARG_REGS.length);
-        int shadow = isVar ? 8 * (total - fixed) : 0;
-        int temp = total * 8;
-        int block = shadow + stackArgs * 8 + temp;
-        block = (block + 15) & ~15;
-
-        if (block > 0)
-            assembly.add(new Directive("\tsub\tsp, sp, #" + block));
-
+    private void placeCallArgumentsDirectly(Call e, TempRegisterAllocationContext context) {
         // Pass1: L->R - 处理浮点数和整数参数
         // 整数参数过多，需要存储到栈上
-        // 其实之前的two pass的实现是有问题的，如果命名参数超过8个的情况下，fixed参数的摆放问题应该重新考虑
         Register stackTemp = allocateTempRegisterWithSpill(context, "Call");
         Register stackTempFloat = allocateFloatTempRegisterWithSpill(context, "Call");
         int floatIndex = -1;
         int intIndex = -1;
+        List<Expr> args = e.args();
+        int total = args.size();
         System.err.println("Processing " + total + " arguments for function call");
-
+        int fixed = 0;
+        if (e.isStaticCall()) {
+            fixed = e.function().type().getFunctionType().paramTypes().size();
+        }
+        boolean isVar = e.isStaticCall() &&
+                e.function().type().getFunctionType().isVararg();
+        // 计算需要的栈空间
+        int stackArgs = Math.max(0, total - ARG_REGS.length);
+        int shadow = isVar ? 8 * (total - fixed) : 0;
         for (int i = 0; i < total; ++i) {
             Expr arg = args.get(i);
             System.err.println("Processing argument " + i + ": " + arg.getClass().getSimpleName() + " (float: "
@@ -1624,7 +1630,6 @@ public class CodeGenerator
                     long off = shadow + (long) (i - ARG_REGS.length) * 8;
                     arg.accept(this, stackTempFloat); // 临时使用d0
                     assembly.add(new Directive("\tstr\t" + stackTempFloat.name() + ", [sp, #" + (off) + "]"));
-
                 }
                 String dst;
                 if (floatIndex < FLOAT_ARG_REGS.length) {
@@ -1660,6 +1665,183 @@ public class CodeGenerator
         }
         releaseTempRegisterWithRestore(stackTemp, context);
         releaseTempRegisterWithRestore(stackTempFloat, context);
+    }
+
+    public Void visit(Call e, Register targetRegister) {
+        // 记录传入寄存器的分配，避免寄存器分配重复
+        TempRegisterAllocationContext context = registerAllocator.makeTempRegisterContext(
+                "Call");
+        context.recordRegisterAllocation(targetRegister);
+
+        // 函数调用，结果放在指定寄存器
+        String targetRegName = targetRegister.name();
+
+        boolean isVar = e.isStaticCall() &&
+                e.function().type().getFunctionType().isVararg();
+        List<Expr> args = e.args();
+        int total = args.size();
+        int fixed = 0;
+        if (e.isStaticCall()) {
+            fixed = e.function().type().getFunctionType().paramTypes().size();
+        }
+
+        // 优化：只保存实际使用到的caller-saved寄存器
+        boolean shouldSaveCallerRegister = !e.isStaticCall() || !e.function().name().equals("alloca");
+        Set<Register> usedCallerSaved = new HashSet<>();
+        if (shouldSaveCallerRegister) {
+            // 获取在函数调用点实际活跃的caller-saved寄存器
+            usedCallerSaved = registerAllocator.getLiveCallerSavedRegisters(currentStmt);
+            System.err.println("Live caller-saved registers at call site: "
+                    + usedCallerSaved.stream().map(Register::name).collect(Collectors.joining(", ")));
+            // 按寄存器对保存，保持16字节对齐
+            saveCallerSavedRegisters(usedCallerSaved);
+        }
+
+        // 计算需要的栈空间
+        int stackArgs = Math.max(0, total - ARG_REGS.length);
+        int shadow = isVar ? 8 * (total - fixed) : 0;
+
+        // 为所有 struct 参数分配栈空间
+        long totalStructSize = 0;
+        boolean hasStruct = false;
+        for (int i = 0; i < total; ++i) {
+            Expr arg = args.get(i);
+            if (isStructOperand(arg)) {
+                hasStruct = true;
+                totalStructSize += getStructSize(arg);
+                // 这里保证每一个结构体都是8字节对齐的，避免因为对齐问题导致逻辑不符合预期
+                totalStructSize = (totalStructSize+7)&(~7);
+            }
+        }
+        // 确保16字节对齐
+        int block = shadow + stackArgs * 8 + (int) totalStructSize;
+        long currentStructOffset = 0L;
+        if (hasStruct) {
+            // 如果有结构体的情况下，要把参数都入栈，所以需要考虑参数空间，每一个按照8字节计算
+            block += (args.size() * 8);
+        }
+        block = (block + 15) & ~15;
+        if (block > 0)
+            assembly.add(new Directive("\tsub\tsp, sp, #" + block));
+        if (!hasStruct) {
+            placeCallArgumentsDirectly(e, context);
+        } else {
+            // 对于有结构体的情况，采取两趟处理方式
+            // 第一趟：把所有值都加载到栈上
+            // 栈布局：shadow + 溢出参数 + 求值临时区(每个8字节)
+
+            for (int i = 0; i < total; ++i) {
+                Expr arg = args.get(i);
+                Register stackTemp = allocateTempRegisterWithSpill(context, "Call");
+                Register stackTempFloat = allocateFloatTempRegisterWithSpill(context, "Call");
+
+                if (isFloatOperand(arg)) {
+                    // 浮点数：求值并存储到求值临时区
+                    arg.accept(this, stackTempFloat);
+                    long off = shadow + (long) (stackArgs) * 8 + (long) i * 8L;
+                    assembly.add(new Directive("\tstr\t" + stackTempFloat.name() + ", [sp, #" + (off) + "]"));
+                } else if (isStructOperand(arg)) {
+                    // 结构体：获取地址，然后使用 memcpy 拷贝到栈上
+                    long structSize = getStructSize(arg);
+                    if (arg instanceof Var var) {
+                        addrOfEntityInto(var.entity(), stackTemp.name());
+                    } else {
+                        // 对于其他类型的结构体表达式，需要求值获取地址
+                        arg.accept(this, stackTemp);
+                    }
+                    // 将地址存储到求值临时区
+                    long off = shadow + (long) (stackArgs) * 8 + (long) i * 8L;
+                    // 为结构体在栈上分配空间
+                    long structStackOffset = shadow + (long) (stackArgs) * 8 + (long) total * 8 + currentStructOffset;
+                    currentStructOffset += structSize;
+                    currentStructOffset  = (currentStructOffset + 7) & (~7);
+                    // 准备 memcpy 参数：目标地址、源地址、大小
+                    // 目标地址（栈上）
+                    assembly.add(new Directive("\tadd\tx0, sp, #" + structStackOffset));
+                    // 源地址
+                    assembly.add(new Directive("\tmov\tx1, " + stackTemp.name()));
+                    // 大小
+                    assembly.add(new Directive("\tmov\tx2, #" + structSize));
+                    // 调用 memcpy 拷贝结构体
+                    assembly.add(new Directive("\tbl\t_memcpy"));
+                    assembly.add(new Directive("\tadd\t"+stackTemp.name()+", sp, #"+structStackOffset));
+                    assembly.add(new Directive("\tstr\t" + stackTemp.name() + ", [sp, #" + (off) + "]"));
+                } else {
+                    // 整型：求值并存储到求值临时区
+                    arg.accept(this, stackTemp);
+                    long off = shadow + (long) (stackArgs) * 8 + (long) i * 8L;
+                    assembly.add(new Directive("\tstr\t" + stackTemp.name() + ", [sp, #" + (off) + "]"));
+                }
+
+                releaseTempRegisterWithRestore(stackTemp, context);
+                releaseTempRegisterWithRestore(stackTempFloat, context);
+            }
+
+            // 第二趟：把参数设置到正确的寄存器上，考虑溢出和变长参数逻辑
+            int floatIndex = -1;
+            int intIndex = -1;
+
+            for (int i = 0; i < total; ++i) {
+                Expr arg = args.get(i);
+                if (isFloatOperand(arg)) {
+                    floatIndex++;
+                    if (floatIndex < FLOAT_ARG_REGS.length) {
+                        // 从求值临时区加载到浮点寄存器
+                        long off = shadow + (long) (total - ARG_REGS.length) * 8 + (long) i * 8L;
+                        assembly.add(new Directive(
+                                "\tldr\t" + FLOAT_ARG_REGS[floatIndex].name() + ", [sp, #" + (off) + "]"));
+                    } else {
+                        // 浮点数参数过多，已经在栈上，无需额外处理
+                        // todo 需要额外处理，否则逻辑不正确
+                    }
+
+                    // 处理变长参数
+                    if (isVar && i >= fixed) {
+                        long sh = (i - fixed) * 8L;
+                        String dst = floatIndex < FLOAT_ARG_REGS.length ? FLOAT_ARG_REGS[floatIndex].toString() : "d0";
+                        assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + sh + "]"));
+                    }
+                } else if (isStructOperand(arg)) {
+                    // 结构体：将栈上结构体的地址传递给函数
+                    intIndex++;
+                    if (intIndex < ARG_REGS.length) {
+                        // 注意，这里暂时没有考虑对齐
+                        long structStackOffset = shadow + (long) (stackArgs) * 8 + (long) total * 8 + (long) i * getStructSize(arg);
+                        // 将栈上结构体的地址加载到寄存器
+                        assembly.add(new Directive(
+                                "\tadd\t" + ARG_REGS[intIndex].name() + ", sp, #" + structStackOffset));
+                    } else {
+                        // 结构体参数过多，已经在栈上，无需额外处理
+                        // todo 需要额外处理，否则逻辑错误
+                    }
+
+                    // 处理变长参数
+                    if (isVar && i >= fixed) {
+                        long sh = (i - fixed) * 8L;
+                        String dst = intIndex < ARG_REGS.length ? ARG_REGS[intIndex].toString() : "x0";
+                        assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + sh + "]"));
+                    }
+                } else {
+                    // 整型：从求值临时区加载到整数寄存器
+                    intIndex++;
+                    if (intIndex < ARG_REGS.length) {
+                        long off = shadow + (long) (total - ARG_REGS.length) * 8 + (long) i * 8L;
+                        assembly.add(new Directive("\tldr\t" + ARG_REGS[intIndex].name() + ", [sp, #" + (off) + "]"));
+                    } else {
+                        // 整型参数过多，已经在栈上，无需额外处理
+                        // todo 需要额外处理，否则逻辑错误
+                    }
+
+                    // 处理变长参数
+                    if (isVar && i >= fixed) {
+                        long sh = (i - fixed) * 8L;
+                        String dst = intIndex < ARG_REGS.length ? ARG_REGS[intIndex].toString() : "x0";
+                        assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + sh + "]"));
+                    }
+                }
+            }
+        }
+
         if (e.isStaticCall()) {
             // 对于变长参数函数，我们需要特殊处理va_init调用
             if (e.function().name().equals("va_init")) {
@@ -1752,6 +1934,32 @@ public class CodeGenerator
             return true;
         }
         return false;
+    }
+
+    private boolean isStructOperand(Expr expr) {
+        if (expr instanceof Var) {
+            Var var = (Var) expr;
+            return var.entity().type().isStruct() || var.entity().type().isUnion();
+        }
+        return false;
+    }
+
+    private long getStructSize(Expr expr) {
+        if (expr instanceof Var) {
+            Var var = (Var) expr;
+            return var.entity().type().size();
+        }
+        return 8; // 默认大小
+    }
+
+    private void copyStructToStack(Register srcReg, long structSize, long offset) {
+        // 设置 memcpy 参数
+        assembly.add(new Directive("\tmov\tx0, sp")); // dst = 栈上目标地址
+        assembly.add(new Directive("\tadd\tx0, x0, #" + offset)); // 加上偏移量
+        assembly.add(new Directive("\tmov\tx1, " + srcReg.name())); // src = 源 struct
+        assembly.add(new Directive("\tmov\tx2, #" + structSize)); // size = struct 大小
+        // 调用 memcpy
+        assembly.add(new Directive("\tbl\t_memcpy"));
     }
 
     private void handleFloatBinaryOp(Bin e, Register targetReg) {
@@ -2082,5 +2290,49 @@ public class CodeGenerator
                 errorHandler.error("unsupported load size: " + sz);
             }
         }
+    }
+
+    private void loadStructValueToRegister(Var var, Register targetReg) {
+        // 专门处理 struct 参数的按值传递
+        // 根据 clang 的实现，我们需要直接将 struct 的值加载到寄存器
+
+        Entity ent = var.entity();
+        if (registerAllocator.isInRegister(ent)) {
+            // 如果变量在寄存器中，直接移动
+            Register srcReg = registerAllocator.getRegister(ent);
+            assembly.add(new Directive("\tmov\t" + targetReg.name() + ", " + srcReg.name()));
+        } else if (localVarOffsets.containsKey(ent)) {
+            // 如果变量在栈上，直接加载
+            long off = localVarOffsets.get(ent);
+            assembly.add(new Directive("\tldr\t" + targetReg.name() + ", [x29, #" + off + "]"));
+        } else {
+            // 如果变量是参数，从参数位置加载
+            long off = paramOffsets.get(ent);
+            assembly.add(new Directive("\tldr\t" + targetReg.name() + ", [x29, #" + off + "]"));
+        }
+    }
+
+    private void copyStructWithMemcpy(Register srcReg, long structSize, Register targetReg, long stackOffset) {
+        // 统一使用 memcpy 方式：拷贝 struct 到栈上，传递指针
+
+        // 计算目标地址：当前栈指针 + 偏移量
+        assembly.add(new Directive("\tadd\t" + targetReg.name() + ", sp, #" + stackOffset));
+
+        // 调用 memcpy 来拷贝 struct
+        // 保存调用者保存的寄存器
+        assembly.add(new Directive("\tstp\tx0, x1, [sp, #-16]!"));
+        assembly.add(new Directive("\tstp\tx2, x3, [sp, #-16]!"));
+
+        // 设置 memcpy 参数
+        assembly.add(new Directive("\tmov\tx0, " + targetReg.name())); // dst = 栈上目标地址
+        assembly.add(new Directive("\tmov\tx1, " + srcReg.name())); // src = 源 struct
+        assembly.add(new Directive("\tmov\tx2, #" + structSize)); // size = struct 大小
+
+        // 调用 memcpy
+        assembly.add(new Directive("\tbl\t_memcpy"));
+
+        // 恢复调用者保存的寄存器
+        assembly.add(new Directive("\tldp\tx2, x3, [sp], #16"));
+        assembly.add(new Directive("\tldp\tx0, x1, [sp], #16"));
     }
 }

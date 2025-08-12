@@ -1,4 +1,5 @@
 package net.loveruby.cflat.ast;
+
 import net.loveruby.cflat.type.Type;
 import net.loveruby.cflat.entity.Entity;
 import net.loveruby.cflat.entity.DefinedVariable;
@@ -28,6 +29,9 @@ public class VariableNode extends LHSNode {
 
     public Entity entity() {
         if (entity == null) {
+            System.err.println("VariableNode.entity == null for name: " + name + " at location: " + location);
+            System.err.println("Current stack trace:");
+            new Exception().printStackTrace(System.err);
             throw new Error("VariableNode.entity == null");
         }
         return entity;
@@ -60,7 +64,7 @@ public class VariableNode extends LHSNode {
         d.printMember("name", name, isResolved());
     }
 
-    public <S,E> E accept(ASTVisitor<S,E> visitor) {
+    public <S, E> E accept(ASTVisitor<S, E> visitor) {
         return visitor.visit(this);
     }
 }

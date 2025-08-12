@@ -193,20 +193,30 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
 
     public Void visit(BlockNode node) {
         scopeStack.add(node.scope());
+
+        // 1. 先收集所有变量到LocalScope中（为了栈空间计算）
         for (DefinedVariable var : node.variables()) {
-            if (var.hasInitializer()) {
-                if (var.isPrivate()) {
-                    // static variables
-                    var.setIR(transformExpr(var.initializer()));
-                } else {
-                    assign(var.location(),
-                            ref(var), transformExpr(var.initializer()));
+            // 什么都不做，只是收集变量信息
+        }
+
+        // 2. 按源代码顺序处理语句
+        for (StmtNode s : node.stmts()) {
+            if (s instanceof VarDeclStmtNode) {
+                // 遇到变量声明语句时，生成该变量的初始化代码
+                VarDeclStmtNode varDecl = (VarDeclStmtNode) s;
+                for (DefinedVariable var : varDecl.variables()) {
+                    if (var.hasInitializer()) {
+                        // 有初始化表达式的变量，在这里生成初始化代码
+                        assign(var.location(), ref(var), transformExpr(var.initializer()));
+                    }
+                    // 没有初始化表达式的变量，不需要生成代码
                 }
+            } else {
+                // 其他类型的语句，使用原来的处理逻辑
+                transformStmt(s);
             }
         }
-        for (StmtNode s : node.stmts()) {
-            transformStmt(s);
-        }
+
         scopeStack.removeLast();
         return null;
     }
@@ -620,13 +630,20 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
         for (ExprNode arg : ListUtils.reverse(node.args())) {
             args.add(0, transformExpr(arg));
         }
-        Expr call = new Call(asmType(node.type()),
-                transformExpr(node.expr()), args);
+
+        // 确保类型不为null，如果为null则使用默认类型
+        Type callType = node.type();
+        if (callType == null) {
+            // 如果类型为null，使用int类型作为默认值
+            callType = typeTable.signedInt();
+        }
+
+        Expr call = new Call(asmType(callType), transformExpr(node.expr()), args);
         if (isStatement()) {
             stmts.add(new ExprStmt(node.location(), call));
             return null;
         } else {
-            DefinedVariable tmp = tmpVar(node.type());
+            DefinedVariable tmp = tmpVar(callType);
             assign(node.location(), ref(tmp), call);
             return ref(tmp);
         }
@@ -722,7 +739,27 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
 
     // #@@range/Member{
     public Expr visit(MemberNode node) {
-        Expr expr = addressOf(transformExpr(node.expr()));
+        Expr baseExpr = transformExpr(node.expr());
+
+        // 检查基础表达式是否已经是指针类型
+        // 如果是函数参数且类型是指针，则不需要再取地址
+        Expr expr;
+        if (baseExpr instanceof Var) {
+            Var var = (Var) baseExpr;
+            Entity entity = var.entity();
+            if (entity instanceof Parameter) {
+                // 函数参数：直接使用，不需要取地址
+                // 因为函数参数在栈上，本身就是地址
+                expr = baseExpr;
+            } else {
+                // 普通变量，需要取地址
+                expr = addressOf(baseExpr);
+            }
+        } else {
+            // 其他情况，按原来的逻辑处理
+            expr = addressOf(baseExpr);
+        }
+
         Expr offset = ptrdiff(node.offset());
         Expr addr = new Bin(ptr_t(), Op.ADD, expr, offset);
         // #@@range/Member_ret{
@@ -848,7 +885,12 @@ class IRGenerator implements ASTVisitor<Void, Expr> {
 
     // #@@range/ref{
     private Var ref(Entity ent) {
-        return new Var(varType(ent.type()), ent);
+        net.loveruby.cflat.asm.Type varAsmType = varType(ent.type());
+        if (varAsmType == null) {
+            // 如果varType返回null（比如结构体类型），使用指针类型
+            varAsmType = ptr_t();
+        }
+        return new Var(varAsmType, ent);
     }
     // #@@}
 

@@ -1,4 +1,5 @@
 package net.loveruby.cflat.ir;
+
 import net.loveruby.cflat.entity.Entity;
 import net.loveruby.cflat.asm.Type;
 import net.loveruby.cflat.asm.Operand;
@@ -14,17 +15,25 @@ public class Var extends Expr {
         this.entity = entity;
     }
 
-    public boolean isVar() { return true; }
+    public boolean isVar() {
+        return true;
+    }
 
     public Type type() {
         if (super.type() == null) {
-            throw new Error("Var is too big to load by 1 insn");
+            // 对于结构体等复合类型，全部按指针处理，简化逻辑
+            return net.loveruby.cflat.asm.Type.get(8);
         }
         return super.type();
     }
 
-    public String name() { return entity.name(); }
-    public Entity entity() { return entity; }
+    public String name() {
+        return entity.name();
+    }
+
+    public Entity entity() {
+        return entity;
+    }
 
     public Operand address() {
         return entity.address();
@@ -44,17 +53,18 @@ public class Var extends Expr {
         return entity;
     }
 
-    public <S,E> E accept(IRVisitor<S,E> visitor) {
+    public <S, E> E accept(IRVisitor<S, E> visitor) {
         return visitor.visit(this);
     }
 
     /**
      * 接受寄存器感知访问者
-     * @param visitor 寄存器感知访问者
+     * 
+     * @param visitor        寄存器感知访问者
      * @param targetRegister 目标寄存器
      * @return 访问结果
      */
-    public <S,E> E accept(RegisterAwareVisitor<S,E> visitor, Register targetRegister) {
+    public <S, E> E accept(RegisterAwareVisitor<S, E> visitor, Register targetRegister) {
         return visitor.visit(this, targetRegister);
     }
 

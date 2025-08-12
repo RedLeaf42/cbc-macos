@@ -628,11 +628,22 @@ BlockNode block():
     Token t;
     List<DefinedVariable> vars;
     List<StmtNode> stmts;
+    List<DefinedVariable> allVars = new ArrayList<DefinedVariable>();
 }
 {
-    t="{" vars=defvar_list() stmts=stmts() "}"
+    t="{" 
+    vars=defvar_list() { allVars.addAll(vars); }
+    stmts=stmts() 
+    "}"
         {
-            return new BlockNode(location(t), vars, stmts);
+            // 从语句中提取变量声明
+            for (StmtNode stmt : stmts) {
+                if (stmt instanceof VarDeclStmtNode) {
+                    VarDeclStmtNode varStmt = (VarDeclStmtNode) stmt;
+                    allVars.addAll(varStmt.variables());
+                }
+            }
+            return new BlockNode(location(t), allVars, stmts);
         }
 }
 // #@@}

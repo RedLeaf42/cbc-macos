@@ -426,7 +426,10 @@ class TypeChecker extends Visitor {
             // insert cast on right expr
             node.setRight(new CastNode(target, node.right()));
         }
-        node.setType(target);
+        // 只有在类型还没有设置的情况下才设置类型
+        if (node.type() == null) {
+            node.setType(target);
+        }
     }
     // #@@}
 
@@ -491,8 +494,21 @@ class TypeChecker extends Visitor {
      * * ARG is neither a struct nor an union.
      */
     public Void visit(FuncallNode node) {
+        System.err.println("=== TypeChecker.visit(FuncallNode) ===");
+        System.err.println("Function call expression: " + node.expr());
+        System.err.println("Function call expression type: " + node.expr().type());
+        System.err.println("Function call expression type class: " + node.expr().type().getClass().getSimpleName());
+
         super.visit(node);
+
+        System.err.println("After super.visit:");
+        System.err.println("Function call expression type: " + node.expr().type());
+
         FunctionType type = node.functionType();
+        System.err.println("FunctionType: " + type);
+        System.err.println("FunctionType returnType: " + type.returnType());
+        System.err.println("FunctionType paramTypes: " + type.paramTypes());
+
         if (!type.acceptsArgc(node.numArgs())) {
             error(node, "wrong number of argments: " + node.numArgs());
             return null;
@@ -502,11 +518,20 @@ class TypeChecker extends Visitor {
         // mandatory args
         for (Type param : type.paramTypes()) {
             ExprNode arg = args.next();
+            System.err.println("Processing mandatory argument:");
+            System.err.println("  Expected param type: " + param);
+            System.err.println("  Actual arg type: " + arg.type());
+            System.err.println("  checkRHS result: " + checkRHS(arg));
+
             newArgs.add(checkRHS(arg) ? implicitCast(param, arg) : arg);
         }
         // optional args
         while (args.hasNext()) {
             ExprNode arg = args.next();
+            System.err.println("Processing optional argument:");
+            System.err.println("  Actual arg type: " + arg.type());
+            System.err.println("  checkRHS result: " + checkRHS(arg));
+
             newArgs.add(checkRHS(arg) ? castOptionalArg(arg) : arg);
         }
         node.replaceArgs(newArgs);
@@ -606,7 +631,9 @@ class TypeChecker extends Visitor {
     // #@@}
 
     private boolean isInvalidStatementType(Type t) {
-        return t.isStruct() || t.isUnion();
+        // 允许结构体作为语句类型，用于结构体赋值
+        // 允许 void 类型作为语句类型，因为函数调用语句是合法的
+        return false;
     }
 
     private boolean isInvalidReturnType(Type t) {
@@ -614,8 +641,8 @@ class TypeChecker extends Visitor {
     }
 
     private boolean isInvalidParameterType(Type t) {
-        return t.isStruct() || t.isUnion() || t.isVoid()
-                || t.isIncompleteArray();
+        return t.isVoid() || t.isIncompleteArray();
+        // 移除了对 struct 和 union 的限制，允许它们作为函数参数
     }
 
     private boolean isInvalidVariableType(Type t) {
@@ -623,12 +650,15 @@ class TypeChecker extends Visitor {
     }
 
     private boolean isInvalidLHSType(Type t) {
+        // 允许结构体作为左值，用于结构体赋值
         // Array is OK if it is declared as a type of parameter.
-        return t.isStruct() || t.isUnion() || t.isVoid() || t.isArray();
+        return t.isVoid() || t.isArray();
     }
 
     private boolean isInvalidRHSType(Type t) {
-        return t.isStruct() || t.isUnion() || t.isVoid();
+        // 允许 struct 和 union 类型作为函数调用的参数
+        // 只拒绝 void 类型
+        return t.isVoid();
     }
 
     private boolean mustBeInteger(ExprNode expr, String op) {

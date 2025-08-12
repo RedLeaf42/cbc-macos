@@ -83,49 +83,88 @@ public class LocalResolver extends Visitor {
 
     // #@@range/BlockNode{
     public Void visit(BlockNode node) {
-        pushScope(node.variables());
-        super.visit(node);
-        node.setScope(popScope());
-        return null;
-    }
-
-    public Void visit(VarDeclStmtNode node) {
-        // 动态添加变量到当前作用域
-        Scope scope = currentScope();
-        if (scope instanceof LocalScope) {
-            LocalScope localScope = (LocalScope) scope;
-            for (DefinedVariable var : node.variables()) {
-                localScope.defineVariable(var);
-            }
+        System.err.println("=== BlockNode.visit() ===");
+        System.err.println("Block variables count: " + node.variables().size());
+        for (DefinedVariable var : node.variables()) {
+            System.err.println("  Block variable: " + var.name() + " (typeNode: " + var.typeNode() + ")");
         }
+        System.err.println("Current scope stack size: " + scopeStack.size());
+        if (!scopeStack.isEmpty()) {
+            System.err.println("Current scope: " + currentScope().getClass().getSimpleName());
+        }
+
+        pushScope(node.variables());
+        System.err.println("After pushScope, scope stack size: " + scopeStack.size());
+        System.err.println("New scope: " + currentScope().getClass().getSimpleName());
+
+        super.visit(node);
+
+        LocalScope poppedScope = popScope();
+        System.err.println("After popScope, scope stack size: " + scopeStack.size());
+        System.err.println("Popped scope variables: " + poppedScope.localVariables().size());
+        for (DefinedVariable var : poppedScope.localVariables()) {
+            System.err.println("  Popped variable: " + var.name());
+        }
+
+        node.setScope(poppedScope);
         return null;
     }
     // #@@}
 
     // #@@range/pushScope{
     private void pushScope(List<? extends DefinedVariable> vars) {
+        System.err.println("=== pushScope() ===");
+        System.err.println("Variables to add: " + vars.size());
+        for (DefinedVariable var : vars) {
+            System.err.println("  Adding variable: " + var.name() + " (typeNode: " + var.typeNode() + ")");
+        }
+
         LocalScope scope = new LocalScope(currentScope());
+        System.err.println("Created new LocalScope with parent: "
+                + (currentScope() != null ? currentScope().getClass().getSimpleName() : "null"));
+
         for (DefinedVariable var : vars) {
             if (scope.isDefinedLocally(var.name())) {
+                System.err.println("ERROR: Duplicate variable: " + var.name());
                 error(var.location(),
                         "duplicated variable in scope: " + var.name());
             } else {
+                System.err.println("Defining variable: " + var.name() + " in scope");
                 scope.defineVariable(var);
             }
         }
+
         scopeStack.addLast(scope);
+        System.err.println("Added scope to stack. Stack size now: " + scopeStack.size());
+
+        // 打印当前作用域中的所有变量
+        System.err.println("Current scope variables:");
+        for (DefinedVariable var : scope.localVariables()) {
+            System.err.println("  " + var.name() + " (typeNode: " + var.typeNode() + ")");
+        }
     }
     // #@@}
 
     // #@@range/popScope{
     private LocalScope popScope() {
-        return (LocalScope) scopeStack.removeLast();
+        System.err.println("=== popScope() ===");
+        System.err.println("Before pop, scope stack size: " + scopeStack.size());
+        LocalScope scope = (LocalScope) scopeStack.removeLast();
+        System.err.println("After pop, scope stack size: " + scopeStack.size());
+        System.err.println("Popped scope variables: " + scope.localVariables().size());
+        return scope;
     }
     // #@@}
 
     // #@@range/currentScope{
     private Scope currentScope() {
-        return scopeStack.getLast();
+        if (scopeStack.isEmpty()) {
+            System.err.println("ERROR: Scope stack is empty!");
+            return null;
+        }
+        Scope scope = scopeStack.getLast();
+        System.err.println("Current scope: " + scope.getClass().getSimpleName());
+        return scope;
     }
     // #@@}
 
@@ -145,11 +184,31 @@ public class LocalResolver extends Visitor {
 
     // #@@range/VariableNode{
     public Void visit(VariableNode node) {
+        System.err.println("=== VariableNode.visit() ===");
+        System.err.println("Looking for variable: " + node.name());
+        System.err.println("Current scope stack size: " + scopeStack.size());
+        if (!scopeStack.isEmpty()) {
+            System.err.println("Current scope: " + currentScope().getClass().getSimpleName());
+        }
+
         try {
             Entity ent = currentScope().get(node.name());
+            System.err.println("Found entity: " + ent.name() + " (typeNode: " + ent.typeNode() + ")");
             ent.refered();
             node.setEntity(ent);
         } catch (SemanticException ex) {
+            System.err.println("ERROR: Cannot resolve variable: " + node.name());
+            System.err.println("Error message: " + ex.getMessage());
+            System.err.println("Current scope variables:");
+            if (!scopeStack.isEmpty()) {
+                Scope scope = currentScope();
+                if (scope instanceof LocalScope) {
+                    LocalScope localScope = (LocalScope) scope;
+                    for (DefinedVariable var : localScope.localVariables()) {
+                        System.err.println("  " + var.name() + " (typeNode: " + var.typeNode() + ")");
+                    }
+                }
+            }
             error(node, ex.getMessage());
         }
         return null;
