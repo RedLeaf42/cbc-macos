@@ -1780,45 +1780,52 @@ public class CodeGenerator
             // 第二趟：把参数设置到正确的寄存器上，考虑溢出和变长参数逻辑
             int floatIndex = -1;
             int intIndex = -1;
-
+            int currentStructStackOffsetPass2 = 0;
+            Register stackTemp = allocateTempRegisterWithSpill(context, "CallPass2");
+            Register stackTempFloat = allocateFloatTempRegisterWithSpill(context, "CallPass2Float");
             for (int i = 0; i < total; ++i) {
                 Expr arg = args.get(i);
                 if (isFloatOperand(arg)) {
                     floatIndex++;
                     if (floatIndex < FLOAT_ARG_REGS.length) {
                         // 从求值临时区加载到浮点寄存器
-                        long off = shadow + (long) (total - ARG_REGS.length) * 8 + (long) i * 8L;
+                        long off = shadow + (long) (stackArgs) * 8 + (long) i * 8L;
                         assembly.add(new Directive(
                                 "\tldr\t" + FLOAT_ARG_REGS[floatIndex].name() + ", [sp, #" + (off) + "]"));
                     } else {
-                        // 浮点数参数过多，已经在栈上，无需额外处理
-                        // todo 需要额外处理，否则逻辑不正确
+                        // 浮点数参数过多，需要存储到栈上
+                        long sourceOffset = shadow + (long) (stackArgs) * 8 + (long) i * 8L;
+                        long targetOff = shadow + (long) (i - ARG_REGS.length) * 8;
+                        new Directive("\tldr\t"+stackTempFloat.name() +", [sp, #"+sourceOffset);
+                        assembly.add(new Directive("\tstr\t" + stackTempFloat.name() + ", [sp, #" + (targetOff) + "]"));
                     }
 
                     // 处理变长参数
                     if (isVar && i >= fixed) {
                         long sh = (i - fixed) * 8L;
-                        String dst = floatIndex < FLOAT_ARG_REGS.length ? FLOAT_ARG_REGS[floatIndex].toString() : "d0";
+                        String dst = floatIndex < FLOAT_ARG_REGS.length ? FLOAT_ARG_REGS[floatIndex].toString() : stackTempFloat.name();
                         assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + sh + "]"));
                     }
                 } else if (isStructOperand(arg)) {
                     // 结构体：将栈上结构体的地址传递给函数
                     intIndex++;
+                    long structStackOffset = shadow + (long) (stackArgs) * 8 + (long) total * 8 + currentStructOffset;
+                    currentStructOffset += getStructSize(arg);
+                    currentStructOffset = (currentStructOffset + 7) & ~7;
                     if (intIndex < ARG_REGS.length) {
-                        // 注意，这里暂时没有考虑对齐
-                        long structStackOffset = shadow + (long) (stackArgs) * 8 + (long) total * 8 + (long) i * getStructSize(arg);
                         // 将栈上结构体的地址加载到寄存器
                         assembly.add(new Directive(
                                 "\tadd\t" + ARG_REGS[intIndex].name() + ", sp, #" + structStackOffset));
                     } else {
-                        // 结构体参数过多，已经在栈上，无需额外处理
-                        // todo 需要额外处理，否则逻辑错误
+                        long targetOff = shadow + (long) (i - ARG_REGS.length) * 8;
+                        assembly.add(new Directive("\tldr\t"+stackTemp.name() +", [sp, #"+structStackOffset +"]"));
+                        assembly.add(new Directive("\tstr\t" + stackTemp.name() + ", [sp, #" + (targetOff) + "]"));
                     }
 
                     // 处理变长参数
                     if (isVar && i >= fixed) {
                         long sh = (i - fixed) * 8L;
-                        String dst = intIndex < ARG_REGS.length ? ARG_REGS[intIndex].toString() : "x0";
+                        String dst = intIndex < ARG_REGS.length ? ARG_REGS[intIndex].toString() : stackTemp.name();
                         assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + sh + "]"));
                     }
                 } else {
@@ -1829,17 +1836,22 @@ public class CodeGenerator
                         assembly.add(new Directive("\tldr\t" + ARG_REGS[intIndex].name() + ", [sp, #" + (off) + "]"));
                     } else {
                         // 整型参数过多，已经在栈上，无需额外处理
-                        // todo 需要额外处理，否则逻辑错误
+                        long sourceOffset = shadow + (long) (stackArgs) * 8 + (long) i * 8L;
+                        long targetOff = shadow + (long) (i - ARG_REGS.length) * 8;
+                        new Directive("\tldr\t"+stackTemp.name() +", [sp, #"+sourceOffset +"]");
+                        assembly.add(new Directive("\tstr\t" + stackTemp.name() + ", [sp, #" + (targetOff) + "]"));
                     }
 
                     // 处理变长参数
                     if (isVar && i >= fixed) {
                         long sh = (i - fixed) * 8L;
-                        String dst = intIndex < ARG_REGS.length ? ARG_REGS[intIndex].toString() : "x0";
+                        String dst = intIndex < ARG_REGS.length ? ARG_REGS[intIndex].toString() : stackTemp.name();
                         assembly.add(new Directive("\tstr\t" + dst + ", [sp, #" + sh + "]"));
                     }
                 }
             }
+            releaseTempRegisterWithRestore(stackTemp, context);
+            releaseTempRegisterWithRestore(stackTempFloat, context);
         }
 
         if (e.isStaticCall()) {
